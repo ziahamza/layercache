@@ -1,0 +1,7 @@
+{
+  "name": "@layercache/fixture-app",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

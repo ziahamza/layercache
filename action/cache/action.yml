@@ -1,0 +1,59 @@
+name: Layer Cache
+description: Restore and save GitHub Actions archives through the Layer Cache v1 Team Cache endpoint.
+author: Layer Cache
+
+inputs:
+  path:
+    description: Files, directories, and glob patterns to restore and save, one per line.
+    required: true
+  key:
+    description: Primary cache key.
+    required: true
+  restore-keys:
+    description: Ordered key prefixes to try after the primary key, one per line.
+    required: false
+  lookup-only:
+    description: Check for a matching entry without downloading it or saving in the post action.
+    required: false
+    default: "false"
+  fail-on-cache-miss:
+    description: Fail the action when no matching entry exists.
+    required: false
+    default: "false"
+  endpoint:
+    description: Layer Cache v1 endpoint. Use HTTPS, or HTTP only for a loopback daemon.
+    required: true
+  token:
+    description: Short-lived Layer Cache token scoped to this Team Cache project. The action masks it in logs.
+    required: true
+  compatibility:
+    description: >-
+      Output compatibility identity. Defaults to the Node job OS and architecture plus schema1. Set this when
+      libc, runtime, or toolchain ABI affects cached outputs.
+    required: false
+  public-cache-mode:
+    description: >-
+      Public Cache restore policy. The only supported value is "disabled". The v1 archive protocol does not
+      carry signed Public Build provenance, so this action will reject any other value until a separate
+      verified-artifact mode checks the signed manifest and complete artifact digest before extraction.
+      The supplied token must not grant unverified Public Cache reads.
+    required: false
+    default: disabled
+
+outputs:
+  cache-hit:
+    description: '"true" for an exact primary-key hit, "false" for a restore-key hit, and empty on a miss.'
+  cache-primary-key:
+    description: Primary key supplied to this action.
+  cache-matched-key:
+    description: Key that matched, or empty on a miss.
+
+runs:
+  using: node24
+  main: dist/main/index.js
+  post: dist/post/index.js
+  post-if: success()
+
+branding:
+  icon: layers
+  color: blue

@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-go:
+    name: Go / Linux x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.4"
+          cache: false
+
+      - name: Require native x64 runner
+        run: test "$(uname -m)" = x86_64
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Race detector
+        run: go test -race ./... -count=1
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build Linux binary
+        run: go build -trimpath -o /tmp/layercache ./cmd/layercache
+
+      - name: Compile Linux arm64 binary
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: arm64
+          GOOS: linux
+        run: go build -trimpath -o /tmp/layercache-linux-arm64 ./cmd/layercache
+
+  linux-arm-go:
+    name: Go / Linux arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.4"
+          cache: false
+
+      - name: Require native arm64 runner
+        run: test "$(uname -m)" = aarch64
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Race detector
+        run: go test -race ./... -count=1
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build Linux arm64 binary
+        run: go build -trimpath -o /tmp/layercache ./cmd/layercache
+
+  macos-go:
+    name: Go / macOS arm64
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.4"
+          cache: false
+
+      - name: Require native arm64 runner
+        run: test "$(uname -m)" = arm64
+
+      - name: Test on the selected macOS runner
+        run: go test ./... -count=1
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build macOS binary
+        run: go build -trimpath -o /tmp/layercache ./cmd/layercache
+
+  cache-action:
+    name: GitHub Action bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: action/cache
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24.13.0"
+
+      - name: Install pinned pnpm
+        run: npm install --global pnpm@10.34.5
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck, test, and verify checked-in bundles
+        run: pnpm check
+
+      - name: Require tracked, clean bundles
+        run: |
+          git ls-files --error-unmatch dist/main/index.js dist/main/package.json dist/post/index.js dist/post/package.json
+          git diff --exit-code -- dist
+          test -z "$(git status --porcelain --untracked-files=all -- dist)"

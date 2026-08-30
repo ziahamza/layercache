@@ -1,0 +1,12 @@
+/bin/
+/dist/
+# The GitHub Action is shipped from checked-in bundles. Keep these exceptions
+# even if the general dist rule is widened later.
+!action/cache/dist/
+!action/cache/dist/**
+/coverage/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+node_modules/

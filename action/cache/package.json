@@ -1,0 +1,28 @@
+{
+  "name": "@layercache/cache-action",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "bundle": "pnpm clean && ncc build src/main.ts -o dist/main --minify && ncc build src/post.ts -o dist/post --minify",
+    "check": "pnpm typecheck && pnpm test && pnpm check:bundle",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@actions/cache": "6.2.0",
+    "@actions/core": "3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@vercel/ncc": "0.45.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}
