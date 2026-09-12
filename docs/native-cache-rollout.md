@@ -1,5 +1,12 @@
 # Native cache rollout, 2026-09-12
 
+Follow-up: the engineer approved a 10 GiB explicit reserve. After deploying that
+change, [Parle run 34717114242](https://github.com/ziahamza/parle-extension/actions/runs/34717114242)
+restored 2,263,669 bytes from Team Cache in 2,198 ms on Linux and skipped the
+Safari macOS + iOS job. This resolves the capacity-blocked warm-cache acceptance
+described below. Whole-host capacity enforcement remains separate unfinished work;
+see [aggregate cache budget](aggregate-cache-budget.md).
+
 ## Implemented
 
 The TypeScript native client serves the Expo provider, local CLI, and
