@@ -43,6 +43,9 @@ type Config struct {
 	EvictionPolicy retention.Policy
 	StageTTL       time.Duration
 	BlobGrace      time.Duration
+	IdleTTL        time.Duration
+	UnreusedTTL    time.Duration
+	SoftBytes      int64
 	Now            func() time.Time
 }
 
@@ -117,6 +120,7 @@ type Member struct {
 }
 
 type MaintenanceResult struct {
+	PrunedEntries  int `json:"prunedEntries"`
 	ExpiredUploads int `json:"expiredUploads"`
 	DeletedBlobs   int `json:"deletedBlobs"`
 	ExpiredLeases  int `json:"expiredLeases"`

@@ -24,6 +24,7 @@ import (
 // from untrusted request fields. Each project retains its own signing secret,
 // persistence, quota and membership policy. Origin is the shared HTTPS origin.
 type ProjectGatewayConfig struct {
+	StoragePool      StoragePoolConfig
 	Origin           string
 	Projects         map[string]config.Config
 	RegistryURL      string
@@ -32,6 +33,7 @@ type ProjectGatewayConfig struct {
 }
 
 type ProjectGateway struct {
+	pool     StoragePoolConfig
 	projects map[string]*Server
 	aliases  map[string]*Server
 	registry *httputil.ReverseProxy
@@ -40,6 +42,9 @@ type ProjectGateway struct {
 var projectAlias = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 func NewProjectGateway(ctx context.Context, cfg ProjectGatewayConfig) (_ *ProjectGateway, err error) {
+	if err := cfg.StoragePool.validate(); err != nil {
+		return nil, err
+	}
 	origin, err := url.Parse(cfg.Origin)
 	if err != nil || origin.Host == "" || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || origin.Path != "" ||
 		(origin.Scheme != "https" && !(origin.Scheme == "http" && isGatewayLoopback(origin.Hostname()))) {
@@ -48,7 +53,7 @@ func NewProjectGateway(ctx context.Context, cfg ProjectGatewayConfig) (_ *Projec
 	if len(cfg.Projects) == 0 || len(cfg.Projects) > 128 {
 		return nil, errors.New("gateway requires 1 to 128 projects")
 	}
-	gateway := &ProjectGateway{projects: map[string]*Server{}, aliases: map[string]*Server{}}
+	gateway := &ProjectGateway{projects: map[string]*Server{}, aliases: map[string]*Server{}, pool: cfg.StoragePool}
 	defer func() {
 		if err != nil {
 			_ = gateway.Close()
@@ -56,6 +61,9 @@ func NewProjectGateway(ctx context.Context, cfg ProjectGatewayConfig) (_ *Projec
 	}()
 	secrets := map[string]bool{}
 	for alias, project := range cfg.Projects {
+		if !cfg.StoragePool.contains(project.DataDir) {
+			return nil, errors.New("project data must be inside the bounded storage pool")
+		}
 		if !projectAlias.MatchString(alias) || project.Role != "team" {
 			return nil, errors.New("gateway projects require valid aliases and Team Cache configurations")
 		}
@@ -70,6 +78,7 @@ func NewProjectGateway(ctx context.Context, cfg ProjectGatewayConfig) (_ *Projec
 		if openErr != nil {
 			return nil, fmt.Errorf("open project %s: %w", alias, openErr)
 		}
+		instance.storagePool = cfg.StoragePool
 		gateway.projects[project.ProjectID], gateway.aliases[alias] = instance, instance
 		secrets[project.LocalToken] = true
 	}
@@ -91,6 +100,11 @@ func NewProjectGateway(ctx context.Context, cfg ProjectGatewayConfig) (_ *Projec
 				pr.Out.SetBasicAuth(cfg.RegistryUsername, cfg.RegistryPassword)
 			},
 			ModifyResponse: func(response *http.Response) error {
+				if response.StatusCode == http.StatusOK && response.Request.Method == http.MethodGet {
+					if repo, _, ok := strings.Cut(strings.TrimPrefix(response.Request.URL.Path, "/v2/"), "/manifests/"); ok {
+						gateway.pool.touchRegistry(repo, response.Header.Get("Docker-Content-Digest"))
+					}
+				}
 				// Do not leak internal credentials, auth realms or upload origins.
 				response.Header.Del("WWW-Authenticate")
 				if location := response.Header.Get("Location"); location != "" {
@@ -135,6 +149,19 @@ func (gateway *ProjectGateway) Close() error {
 
 func (gateway *ProjectGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
+	// Reject new growth while preserving restores, cancellation and deletion.
+	// Atomic kernel allocation inside the bounded filesystem is the hard cap
+	// under concurrent requests; Content-Length is only an early admission hint.
+	if (r.Method == http.MethodPut || r.Method == http.MethodPost || r.Method == http.MethodPatch) && !strings.HasPrefix(r.URL.Path, "/v1/auth/") {
+		requested := max(r.ContentLength, 1<<20)
+		if requested > (1<<62) || !gateway.pool.admits(requested*2) {
+			writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": "storage pool has insufficient headroom"})
+			return
+		}
+		if gateway.pool.Path != "" && r.Body != nil {
+			r.Body = &poolAdmissionBody{ReadCloser: r.Body, pool: gateway.pool}
+		}
+	}
 	if !canonicalGatewayPath(r.URL.Path) {
 		http.NotFound(w, r)
 		return
@@ -152,6 +179,18 @@ func (gateway *ProjectGateway) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	project.Handler().ServeHTTP(w, r)
+}
+
+type poolAdmissionBody struct {
+	io.ReadCloser
+	pool StoragePoolConfig
+}
+
+func (body *poolAdmissionBody) Read(buffer []byte) (int, error) {
+	if !body.pool.admits(int64(len(buffer)) * 2) {
+		return 0, errors.New("storage pool has insufficient streaming headroom")
+	}
+	return body.ReadCloser.Read(buffer)
 }
 
 func (gateway *ProjectGateway) routeProject(w http.ResponseWriter, r *http.Request) (*Server, bool) {
@@ -239,6 +278,12 @@ func routingProject(encoded string) (string, error) {
 }
 
 func (gateway *ProjectGateway) serveRegistry(w http.ResponseWriter, r *http.Request) {
+	release, err := gateway.pool.registryLease()
+	if err != nil {
+		http.Error(w, "registry maintenance in progress", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
 	w.Header().Set("Docker-Distribution-API-Version", "registry/2.0")
 	deny := func() {
 		w.Header().Set("WWW-Authenticate", `Basic realm="Layer Cache"`)

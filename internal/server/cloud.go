@@ -83,6 +83,9 @@ func cloudStoreConfig(cfg config.Config) cloud.Config {
 		EvictionPolicy: cfg.EvictionPolicy,
 		StageTTL:       cfg.CloudStageTTL,
 		BlobGrace:      cfg.CloudBlobGrace,
+		IdleTTL:        cfg.CacheIdleTTL,
+		UnreusedTTL:    cfg.CacheUnreusedTTL,
+		SoftBytes:      cfg.CacheSoftBytes,
 	}
 }
 

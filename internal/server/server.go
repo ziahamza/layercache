@@ -47,6 +47,7 @@ type publicBuildCoordinator interface {
 }
 
 type Server struct {
+	storagePool       StoragePoolConfig
 	config            config.Config
 	runtimeLock       *runtimeDirectoryLock
 	store             cacheStore
@@ -360,6 +361,9 @@ func (server *Server) status(writer http.ResponseWriter, request *http.Request) 
 		"artifacts": stats.Artifacts, "entries": stats.Entries,
 		"evictionPolicy": server.config.EvictionPolicy,
 		"runtimePid":     server.runtimePID, "runtimeInstanceId": server.runtimeInstanceID,
+	}
+	if server.storagePool.Path != "" {
+		result["storagePool"] = server.storagePool.status()
 	}
 	if server.cloudStore != nil {
 		result["storageBackend"] = "postgresql+s3"

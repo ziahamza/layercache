@@ -20,6 +20,7 @@ export interface Options {
   cacheDir?: string;
   maxBytes?: number;
   timeoutMs?: number;
+  maxAgeMs?: number;
 }
 export interface Result {
   hit: boolean;
@@ -69,6 +70,7 @@ export class NativeCache {
     this.root = resolve(options.cacheDir ?? process.env.LAYER_CACHE_NATIVE_DIR ?? join(homedir(), '.cache', 'layercache', 'native-v1'));
     this.maxBytes = options.maxBytes ?? 5 * 1024 ** 3;
     if (!Number.isSafeInteger(this.maxBytes) || this.maxBytes <= 0) throw new Error('maxBytes must be positive integer bytes');
+    if (options.maxAgeMs !== undefined && (!Number.isSafeInteger(options.maxAgeMs) || options.maxAgeMs <= 0)) throw new Error('maxAgeMs must be positive integer milliseconds');
     this.options = { ...options, endpoint: options.endpoint ? origin(options.endpoint) : undefined };
   }
   private async locked<T>(run: () => Promise<T>): Promise<T> {
@@ -104,8 +106,9 @@ export class NativeCache {
       return { path, size: info.size, used: info.mtimeMs };
     }));
     let bytes = entries.reduce((total, entry) => total + entry.size, 0);
+    const cutoff = Date.now() - (this.options.maxAgeMs ?? 7 * 86400_000);
     for (const entry of entries.sort((a, b) => a.used - b.used)) {
-      if (bytes + reserve <= this.maxBytes) break;
+      if (bytes + reserve <= this.maxBytes && entry.used > cutoff) break;
       if (entry.path === keep) continue;
       await rm(entry.path, { force: true });
       await rm(`${entry.path}.sha256`, { force: true });

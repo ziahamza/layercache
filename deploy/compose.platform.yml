@@ -1,5 +1,56 @@
 # Personal host wiring supplies image and state paths through its include env.
 services:
+  layercache-postgres:
+    image: pgvector/pgvector@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
+    restart: unless-stopped
+    network_mode: host
+    user: "999:999"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    environment:
+      POSTGRES_USER: layercache_pool_admin
+      POSTGRES_PASSWORD_FILE: /run/cache-secrets/postgres-password
+      PGDATA: /pool/postgres
+    entrypoint: ["/bin/sh", "/pool-guard.sh"]
+    command: ["docker-entrypoint.sh", "postgres", "-p", "5439", "-c", "listen_addresses=127.0.0.1", "-c", "max_wal_size=256MB", "-c", "shared_buffers=64MB"]
+    volumes:
+      - ${LAYER_CACHE_PLATFORM_ROOT}/data/layercache-pool:/pool
+      - ${LAYER_CACHE_PLATFORM_ROOT}/secrets/layercache/pool:/run/cache-secrets:ro
+      - ./pool/guard.sh:/pool-guard.sh:ro
+    tmpfs: ["/tmp:size=32m", "/var/run/postgresql:size=16m,uid=999,gid=999"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  layercache-minio:
+    image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    restart: unless-stopped
+    network_mode: host
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 128
+    environment:
+      MINIO_ROOT_USER_FILE: /run/cache-secrets/minio-user
+      MINIO_ROOT_PASSWORD_FILE: /run/cache-secrets/minio-password
+    entrypoint: ["/bin/sh", "/pool-guard.sh"]
+    command: ["minio", "server", "/pool/minio", "--address", "127.0.0.1:9004", "--console-address", "127.0.0.1:9005"]
+    volumes:
+      - ${LAYER_CACHE_PLATFORM_ROOT}/data/layercache-pool:/pool
+      - ${LAYER_CACHE_PLATFORM_ROOT}/secrets/layercache/pool:/run/cache-secrets:ro
+      - ./pool/guard.sh:/pool-guard.sh:ro
+    tmpfs: ["/tmp:size=32m"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
   layercache-gateway:
     image: ${LAYER_CACHE_IMAGE:?Set a tested local image digest}
     pull_policy: never
@@ -20,13 +71,11 @@ services:
     network_mode: host
     volumes:
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/gitenv:/etc/layercache:ro
-      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/gitenv:/var/lib/layercache
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache-pool:/pool
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data:/host-capacity:ro
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/agent-access:/etc/layercache-agent-access:ro
-      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/agent-access:/var/lib/layercache-agent-access
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/parle:/etc/layercache-parle:ro
-      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/parle:/var/lib/layercache-parle
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/booker:/etc/layercache-booker:ro
-      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/booker:/var/lib/layercache-booker
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/gateway:/etc/layercache-gateway:ro
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/registry:/etc/layercache-registry:ro
     tmpfs: ["/tmp:size=67108864,mode=1777"]
@@ -47,12 +96,16 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     network_mode: host
+    entrypoint: ["/bin/sh", "/pool-guard.sh"]
+    command: ["/entrypoint.sh", "/etc/docker/registry/config.yml"]
     env_file:
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/layercache-registry.env
     volumes:
       - ${LAYER_CACHE_REGISTRY_CONFIG:?Set registry configuration}:/etc/docker/registry/config.yml:ro
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/registry:/run/registry-secrets:ro
-      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/registry:/var/lib/registry
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache-pool/registry:/var/lib/registry
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache-pool:/pool:ro
+      - ./pool/guard.sh:/pool-guard.sh:ro
     stop_grace_period: 45s
     logging:
       driver: json-file

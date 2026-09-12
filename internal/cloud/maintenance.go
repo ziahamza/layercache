@@ -14,6 +14,16 @@ import (
 func (store *Store) Maintain(ctx context.Context) (MaintenanceResult, error) {
 	var result MaintenanceResult
 	now := store.config.Now().UTC()
+	var err error
+	result.PrunedEntries, err = store.pruneExpiredEntries(ctx, now)
+	if err != nil {
+		return result, err
+	}
+	if store.config.SoftBytes > 0 {
+		if err := store.GC(ctx, store.config.SoftBytes); err != nil && !errors.Is(err, ErrQuota) {
+			return result, err
+		}
+	}
 	if _, err := store.database.ExecContext(ctx, `
 		DELETE FROM layercache_blob_read_leases_v1 WHERE expires_at <= $1`, now); err != nil {
 		return result, store.safeError("expire cloud read leases", err)

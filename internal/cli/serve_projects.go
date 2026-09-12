@@ -21,12 +21,13 @@ import (
 )
 
 type projectGatewayFile struct {
-	Listen               string            `json:"listen"`
-	Origin               string            `json:"origin"`
-	Projects             map[string]string `json:"projects"`
-	RegistryURL          string            `json:"registryUrl,omitempty"`
-	RegistryUsername     string            `json:"registryUsername,omitempty"`
-	RegistryPasswordFile string            `json:"registryPasswordFile,omitempty"`
+	StoragePool          server.StoragePoolConfig `json:"storagePool,omitempty"`
+	Listen               string                   `json:"listen"`
+	Origin               string                   `json:"origin"`
+	Projects             map[string]string        `json:"projects"`
+	RegistryURL          string                   `json:"registryUrl,omitempty"`
+	RegistryUsername     string                   `json:"registryUsername,omitempty"`
+	RegistryPasswordFile string                   `json:"registryPasswordFile,omitempty"`
 }
 
 func loadProjectGateway(path string) (projectGatewayFile, server.ProjectGatewayConfig, error) {
@@ -49,6 +50,7 @@ func loadProjectGateway(path string) (projectGatewayFile, server.ProjectGatewayC
 		return file, cfg, errors.New("project gateway must listen on loopback behind a TLS gateway")
 	}
 	cfg.Origin = file.Origin
+	cfg.StoragePool = file.StoragePool
 	cfg.Projects = map[string]config.Config{}
 	for alias, configPath := range file.Projects {
 		if !filepath.IsAbs(configPath) {

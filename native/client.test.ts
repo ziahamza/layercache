@@ -91,6 +91,17 @@ test('bounded cache evicts least recently used archives without deleting unrelat
   assert.ok(sizes.reduce((a, b) => a + b, 0) <= cache.maxBytes);
 });
 
+test('native cache prunes idle archives below its capacity', async t => {
+  const { root, app } = await fixture(t);
+  const cache = new NativeCache({ cacheDir: join(root, 'cache'), maxAgeMs: 1000 });
+  await cache.save(identity, app);
+  const archive = join(cache.root, `${artifactKey(identity)}.tgz`);
+  await utimes(archive, new Date(1), new Date(1));
+  await cache.save({ ...identity, key: 'fresh' }, app);
+  assert.equal((await cache.restore(identity)).hit, false);
+  assert.equal((await cache.restore({ ...identity, key: 'fresh' })).hit, true);
+});
+
 test('team upload and restore stream through independent local caches with digest verification', async t => {
   const { root, app } = await fixture(t);
   const objects = new Map<string, Buffer>();

@@ -5,5 +5,5 @@
     "erasableSyntaxOnly": true, "verbatimModuleSyntax": true,
     "allowJs": true, "checkJs": false, "noEmit": true, "types": ["node"]
   },
-  "include": ["native/*.ts", "action/native/*.ts"]
+  "include": ["native/*.ts", "action/native/*.ts", "deploy/pool/*.ts"]
 }

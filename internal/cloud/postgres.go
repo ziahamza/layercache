@@ -88,6 +88,9 @@ func validateConfig(config *Config) error {
 	if config.MaxBytes <= 0 {
 		return errors.New("cloud project quota must be positive")
 	}
+	if config.IdleTTL < 0 || config.UnreusedTTL < 0 || config.SoftBytes < 0 || config.SoftBytes > config.MaxBytes {
+		return errors.New("invalid proactive cache retention configuration")
+	}
 	if config.StageTTL == 0 {
 		config.StageTTL = DefaultStageTTL
 	}

@@ -93,6 +93,9 @@ type Config struct {
 	CloudS3UsePathStyle        bool              `json:"cloudS3UsePathStyle,omitempty"`
 	CloudStageTTL              time.Duration     `json:"cloudStageTtl,omitempty"`
 	CloudBlobGrace             time.Duration     `json:"cloudBlobGrace,omitempty"`
+	CacheIdleTTL               time.Duration     `json:"cacheIdleTtl,omitempty"`
+	CacheUnreusedTTL           time.Duration     `json:"cacheUnreusedTtl,omitempty"`
+	CacheSoftBytes             int64             `json:"cacheSoftBytes,omitempty"`
 	RemoteMetadataTimeout      time.Duration     `json:"remoteMetadataTimeout,omitempty"`
 	RemoteTransferIdleTimeout  time.Duration     `json:"remoteTransferIdleTimeout,omitempty"`
 	BypassAdapters             []string          `json:"bypassAdapters"`
@@ -282,6 +285,9 @@ func Exists(path string) (bool, error) {
 }
 
 func (cfg Config) Validate() error {
+	if cfg.CacheIdleTTL < 0 || cfg.CacheUnreusedTTL < 0 || cfg.CacheSoftBytes < 0 || cfg.CacheSoftBytes > cfg.MaxBytes {
+		return errors.New("cache retention durations and soft target must be nonnegative; soft target cannot exceed maxBytes")
+	}
 	if _, err := retention.Normalize(cfg.EvictionPolicy); err != nil {
 		return err
 	}

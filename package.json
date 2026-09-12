@@ -12,7 +12,7 @@
   "scripts": {
     "build": "node native/build.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --test native/*.test.ts",
+    "test": "node --test native/*.test.ts deploy/pool/*.test.ts",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": { "tar": "7.5.22" },

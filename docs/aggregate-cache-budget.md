@@ -1,64 +1,95 @@
 # Aggregate cache budget
 
-Status: implementation contract, not an implemented guarantee.
+Implemented for the personal single-host deployment on 2026-09-12.
 
-The deployment currently has four independent 5 GiB committed Team Cache quotas.
-These are not a 20 GiB physical limit. Temporary writes, metadata, S3 publication
-copies, deferred deletion, and registry data must be accounted for separately.
-The explicit 10 GiB free-disk reserve is a host safety setting, not cache capacity.
+## Hard ceiling
 
-## Required invariant
+All active Team Cache PostgreSQL data and WAL, MinIO objects and multipart
+uploads, registry layers, gateway staging/indexes, and this engineer's default
+Local Cache directory now live on one 48 GiB ext4 filesystem. Its sparse backing
+file is bounded at 48 GiB, leaving margin under the approved 50 GiB ceiling for
+bounded service logs. A sparse image does not preallocate 48 GiB. Discard returns
+freed extents to the host.
 
-For each configured storage pool, physical allocated bytes plus reserved future
-writes must never exceed its fixed capacity. Every writer must participate,
-including native archives, Actions, Turbo, OCI registry uploads, database/index
-growth, and LayerCache-managed build scratch. Public Builds are currently disabled.
-External checkout outputs and unrelated Docker/VM data are outside that pool and
-must be reported separately rather than silently counted as controlled storage.
+The kernel enforces this physical limit across writers and crashes. Missing
+mounts fail closed: the gateway and backend startup guards verify the pool marker
+and filesystem size. Gateway project paths cannot escape the pool. The gateway
+checks both pool and host headroom before writes and while streaming request
+bodies. Concurrent allocation is ultimately limited by the filesystem, not by a
+periodic directory scan or a process-local counter. Exhaustion rejects writes;
+it does not fall back to an unbounded directory.
 
-Do not claim one pool covers multiple independent machines. Each local machine
-gets its own limit; hosted cache capacity has its own limit. Reuse across projects
-must not bypass project authorization.
+The 10 GiB reserve remains an admission safety setting for both the pool and
+host filesystem. It cannot stop unrelated processes consuming host space.
+PostgreSQL/MinIO now have dedicated cache instances. Shared platform services
+were not stopped or migrated. Original cache namespaces and duplicate local data
+were retired after live verification; database snapshots remain inside the pool.
 
-## Implementation sequence
+This is a deployment-level physical guarantee, not a new distributed S3 quota
+protocol. Other installations must provision bounded storage to obtain the same
+guarantee. Explicit custom cache paths, other engineers' machines, downloaded
+workspace build outputs, unrelated Docker build cache, and external VM disks
+are not controlled by this pool. Public Builds remain disabled; their scratch
+must join a bounded pool before deployment.
 
-1. Inventory physical ownership and backing filesystems. Shared PostgreSQL WAL
-   and MinIO housekeeping prevent a precise physical guarantee based solely on
-   per-project logical rows. Use dedicated quota-controlled storage for a hard
-   physical backstop, or explicitly describe the narrower accounted-byte contract.
-2. Add durable, atomic capacity reservations shared by all writers. Reserve the
-   peak of uploads, publication copies, decompression, and metadata before writing.
-   Unknown-length writes acquire bounded increments before accepting each chunk.
-   Pins and active readers count against capacity. Failure to make room rejects
-   the operation safely, without dropping valid referenced artifacts.
-3. Keep bytes charged through pending deletion and multipart cleanup until the
-   backend confirms physical release. Reconcile reservations after crashes before
-   reopening writes. Restart, parallel processes, failed deletes, and expired
-   uploads must not create uncharged capacity.
-4. Add registry graph-aware retention. Delete only eligible manifest/tag roots,
-   then collect blobs unreachable from retained roots and active uploads/readers.
-   Deduplicated blobs count once. A tag count limit alone is not a byte limit.
-5. Reuse impact eviction for known build costs, verified reuse, recency, and
-   unique bytes. Fall back to LRU when evidence is missing. Add admission
-   comparison so a huge low-value newcomer need not displace useful residents.
-   Preserve a small bounded probation area to learn about new artifacts.
-6. Add a configurable soft target below the hard ceiling to leave upload and
-   verification headroom. Report committed, staging, reserved, pending deletion,
-   metadata, registry, and remaining bytes, plus eviction and rejection reasons.
+## Proactive retention
 
-## Acceptance
+A ceiling is not a utilization target.
 
-- Fill a tiny pool under concurrent Actions, native/Turbo, and registry writes.
-  Sample allocated storage throughout, not just after periodic GC.
-- Assert the ceiling across staging, publication, extraction, cancellation,
-  process crashes, restart reconciliation, failed deletes, and active readers.
-- Lower the limit below existing usage: block new reservations, reclaim eligible
-  objects, and report inability to comply when pins prevent shrinkage. Never claim
-  immediate compliance before the bytes are actually released.
-- Replay the same workloads against LRU and impact/admission policies. Compare
-  net build time saved and hit rate, with timing coverage and unknowns explicit.
-- Prove fresh-worktree and CI restores remain correct after pressure-induced GC.
+- Team Cache maintenance runs each minute. Unreused blob groups expire after
+  24 hours; reused groups expire after seven idle days. A fresh alias, pin, or
+  active read lease protects the whole digest group from TTL pruning.
+- Each project's committed cache has a 1 GiB soft target, below its existing
+  5 GiB quota. Impact eviction ranks observed producer cost, verified reuse,
+  age, and unique bytes. Missing timing falls back to LRU. Pins may prevent
+  reaching the soft target; they do not bypass the physical ceiling.
+- S3 bytes remain physically charged until collection actually removes them,
+  including the existing one-hour deletion grace and live-reader protection.
+- Registry collection runs every four hours. New manifests get 24 hours of
+  probation. Keep the newest three tagged roots per repository unless they
+  become idle for seven days; older excess roots are eligible after a day
+  without manifest reads. Tags starting with `keep-` protect their root.
+  Retained OCI indexes and subjects protect their transitive child manifests.
+- An exclusive cross-process registry lease drains gateway requests before
+  root retirement and offline mark-and-sweep. New registry requests get a
+  retryable 503 during collection. Other cache protocols stay online.
+- Native Local Cache prunes seven-day-idle archives during cache operations,
+  even below its byte budget. Access refreshes recency.
 
-The pool size is a deployment choice still to be confirmed. A proposed starting
-budget is 50 GiB, separate from the 10 GiB host reserve. Do not treat that proposal
-as deployed configuration.
+TTL fields are opt-in in the server configuration:
+`cacheIdleTtl`, `cacheUnreusedTtl` are duration nanoseconds;
+`cacheSoftBytes` is bytes. Zero disables the respective proactive rule.
+Protected workload data should use pins or registry `keep-` tags, not rely on
+cache retention for backup.
+
+## Operations and evidence
+
+The pool is mounted through a persistent systemd mount unit at
+`/home/hzia/platform/data/layercache-pool`. Default local data at
+`~/.cache/layercache` points into its `local` directory. The gateway's authenticated
+`/v1/status` includes storagePool capacity, used/available bytes, reserve, and
+host free-space health. Container logs are capped at 30 MB per service.
+
+Host preparation: `deploy/pool/prepare.ts`.
+Registry selection and collection: `deploy/pool/registry-policy.ts` and
+`deploy/pool/prune-registry.ts`. Root-only host migration scripts live in the
+config repository; no credentials or cache payloads are checked into Git.
+
+Validation completed:
+
+- Real PostgreSQL/S3 pruning and impact-policy tests passed under the race
+  detector, including below-quota expiry, pins, and active reader protection.
+- A disposable 64 MiB filesystem rejected concurrent writers at its hard
+  ceiling. Deletion, sync and trim reduced allocated backing bytes from
+  61,579,264 to 4,272,128. Production was not filled for this test.
+- Four projects restored their original 128 MiB artifacts with matching
+  digests after migration. Project isolation and signed Actions downloads passed.
+- Actual Docker build, push, immutable-digest pull, and file verification passed.
+  Registry collection also ran successfully through its systemd service.
+- [Parle hosted run](https://github.com/ziahamza/parle-extension/actions/runs/34717881362)
+  restored its native artifact after migration and skipped the Mac build.
+
+Remaining refinements: workload-driven tuning, value-aware admission before
+displacing a more useful resident, and a distributed capacity coordinator for
+deployments without a bounded shared filesystem. This implementation does not
+claim optimal hit rate or measured CPU savings from its retention heuristic.
