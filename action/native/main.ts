@@ -25,6 +25,12 @@ async function main(): Promise<void> {
   output('elapsed-ms', String(Math.round(result.elapsedMs)));
   process.stdout.write(`Layer Cache native ${operation}: ${result.source}, ${result.bytes} bytes, ${Math.round(result.elapsedMs)}ms.\n`);
 }
-main().catch(() => {
+main().catch((error: unknown) => {
+  // Report only fixed protocol diagnostics, never arbitrary errors containing
+  // credentials, URLs, filesystem paths, or archive-controlled entry names.
+  const message = error instanceof Error ? error.message : '';
+  if (/^(?:GitHub OIDC returned HTTP \d{3}|Turbo OIDC exchange returned HTTP \d{3}|Team Cache returned HTTP \d{3}|Invalid artifact digest or size|Artifact integrity check failed|Artifact exceeds declared size)$/.test(message)) {
+    process.stdout.write(`::warning::Layer Cache native: ${message}.\n`);
+  }
   process.stdout.write('::warning::Layer Cache native operation unavailable. Run the normal build; check OIDC permissions, key, compatibility, and disk budget.\n');
 });

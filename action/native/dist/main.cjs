@@ -3175,7 +3175,7 @@ var NativeCache = class {
           if (!response.ok && response.status !== 409) throw new Error(`Team Cache upload returned HTTP ${response.status}; Local Cache retained`);
           if (response.status === 409) throw new Error("Native artifact key already has different content; use a complete build key");
         }
-        return { hit: false, source: "local", path, digest, bytes: size, elapsedMs: performance.now() - started };
+        return { hit: false, source: url ? "team" : "local", path, digest, bytes: size, elapsedMs: performance.now() - started };
       } finally {
         await (0, import_promises2.rm)(temporary, { force: true });
       }
@@ -3372,6 +3372,11 @@ async function main() {
   process.stdout.write(`Layer Cache native ${operation}: ${result.source}, ${result.bytes} bytes, ${Math.round(result.elapsedMs)}ms.
 `);
 }
-main().catch(() => {
+main().catch((error) => {
+  const message = error instanceof Error ? error.message : "";
+  if (/^(?:GitHub OIDC returned HTTP \d{3}|Turbo OIDC exchange returned HTTP \d{3}|Team Cache returned HTTP \d{3}|Invalid artifact digest or size|Artifact integrity check failed|Artifact exceeds declared size)$/.test(message)) {
+    process.stdout.write(`::warning::Layer Cache native: ${message}.
+`);
+  }
   process.stdout.write("::warning::Layer Cache native operation unavailable. Run the normal build; check OIDC permissions, key, compatibility, and disk budget.\n");
 });

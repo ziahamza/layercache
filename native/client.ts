@@ -199,7 +199,7 @@ export class NativeCache {
           if (!response.ok && response.status !== 409) throw new Error(`Team Cache upload returned HTTP ${response.status}; Local Cache retained`);
           if (response.status === 409) throw new Error('Native artifact key already has different content; use a complete build key');
         }
-        return { hit: false, source: 'local', path, digest, bytes: size, elapsedMs: performance.now() - started };
+        return { hit: false, source: url ? 'team' : 'local', path, digest, bytes: size, elapsedMs: performance.now() - started };
       } finally { await rm(temporary, { force: true }); }
     });
   }
