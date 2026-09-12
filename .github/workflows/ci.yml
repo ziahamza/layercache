@@ -182,4 +182,4 @@ jobs:
 
       - name: Test installer and runner setup
         working-directory: .
-        run: node --test action/setup/setup.test.mjs scripts/install.test.mjs
+        run: node --test action/setup/setup.test.mjs action/turbo/turbo.test.mjs scripts/install.test.mjs

@@ -1,0 +1,20 @@
+name: Layer Cache for Turbo
+description: Connect native Turbo to Team Cache with short-lived GitHub OIDC credentials.
+inputs:
+  team-url:
+    description: HTTPS Team Cache endpoint.
+    required: true
+  project:
+    description: Project identity. Defaults to github.com/owner/repo in lowercase.
+  compatibility:
+    description: Explicit artifact ABI shared by compatible CI and local builds.
+    required: true
+  ttl-minutes:
+    description: Credential lifetime, from 1 to 60 minutes.
+    default: '30'
+outputs:
+  expires-at:
+    description: Credential expiration time.
+runs:
+  using: node24
+  main: main.mjs
