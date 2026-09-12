@@ -5,15 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/layercache/layercache/internal/artifact"
 	"io"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/layercache/layercache/internal/artifact"
 )
 
 func TestProactivePruningBelowQuota(t *testing.T) {
-	if os.Getenv("LAYER_CACHE_QA_POSTGRES_URL") == "" {
+	if os.Getenv("LAYER_CACHE_QA_POSTGRES_URL") == "" || os.Getenv("LAYER_CACHE_QA_S3_ENDPOINT") == "" {
 		t.Skip("requires disposable PostgreSQL/S3")
 	}
 	ctx := context.Background()
