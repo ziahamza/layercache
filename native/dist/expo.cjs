@@ -40,6 +40,7 @@ var import_node_crypto3 = require("node:crypto");
 var import_node_crypto4 = require("node:crypto");
 var import_node_child_process = require("node:child_process");
 var import_node_util = require("node:util");
+var import_node_module = require("node:module");
 
 // native/client.ts
 var import_node_crypto2 = require("node:crypto");
@@ -3333,6 +3334,25 @@ function client(options) {
 }
 var warn = () => console.warn("Layer Cache native reuse unavailable; Expo will build normally. Check credentials, compatibility, cache budget, and development configuration.");
 var provider = {
+  async calculateFingerprintHash(props) {
+    try {
+      const project = (0, import_node_module.createRequire)((0, import_node_path11.join)(props.projectRoot, "package.json"));
+      let fingerprint;
+      try {
+        fingerprint = project("@expo/fingerprint");
+      } catch {
+        const expo = (0, import_node_module.createRequire)(project.resolve("expo/package.json"));
+        const cli = (0, import_node_module.createRequire)(expo.resolve("@expo/cli/package.json"));
+        fingerprint = cli("@expo/fingerprint");
+      }
+      const result = await fingerprint.createFingerprintAsync(props.projectRoot);
+      if (typeof result.hash !== "string" || !/^[a-f0-9]{16,128}$/.test(result.hash)) throw new Error("Invalid Expo fingerprint");
+      return result.hash;
+    } catch {
+      warn();
+      return null;
+    }
+  },
   async resolveBuildCache(props, options) {
     const destination = (0, import_node_path11.join)(props.projectRoot, ".expo", "layercache", (0, import_node_crypto3.randomUUID)());
     try {

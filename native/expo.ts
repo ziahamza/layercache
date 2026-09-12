@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createRequire } from 'node:module';
 import { NativeCache, environmentOptions } from './client.ts';
 import type { Identity, Options } from './client.ts';
 
@@ -52,6 +53,24 @@ function client(options: ProviderOptions): NativeCache {
 }
 const warn = () => console.warn('Layer Cache native reuse unavailable; Expo will build normally. Check credentials, compatibility, cache budget, and development configuration.');
 const provider = {
+  async calculateFingerprintHash(props: { projectRoot: string }): Promise<string | null> {
+    try {
+      const project = createRequire(join(props.projectRoot, 'package.json'));
+      let fingerprint;
+      try { fingerprint = project('@expo/fingerprint'); }
+      catch {
+        // pnpm does not expose Expo's transitive fingerprint dependency to the
+        // app. Use the SDK's pinned copy rather than silently disabling caching
+        // or downloading a different fingerprint implementation at runtime.
+        const expo = createRequire(project.resolve('expo/package.json'));
+        const cli = createRequire(expo.resolve('@expo/cli/package.json'));
+        fingerprint = cli('@expo/fingerprint');
+      }
+      const result = await fingerprint.createFingerprintAsync(props.projectRoot);
+      if (typeof result.hash !== 'string' || !/^[a-f0-9]{16,128}$/.test(result.hash)) throw new Error('Invalid Expo fingerprint');
+      return result.hash;
+    } catch { warn(); return null; }
+  },
   async resolveBuildCache(props: BuildProps, options: ProviderOptions): Promise<string | null> {
     const destination = join(props.projectRoot, '.expo', 'layercache', randomUUID());
     try {

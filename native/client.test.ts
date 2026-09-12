@@ -142,3 +142,18 @@ test('Expo provider reuses Debug clients across worktrees but refuses Release fi
   assert.equal(await readFile(join(restored!, 'binary'), 'utf8'), 'native code');
   assert.throws(() => identityForBuild({ ...props, runOptions: { configuration: 'Release' } }, options), /development/);
 });
+
+test('Expo provider resolves the SDK fingerprint package in a pnpm-style dependency layout', async t => {
+  const { root } = await fixture(t);
+  const projectRoot = join(root, 'sdk-app');
+  const expo = join(projectRoot, 'node_modules/expo');
+  const cli = join(expo, 'node_modules/@expo/cli');
+  const fingerprint = join(cli, 'node_modules/@expo/fingerprint');
+  await mkdir(fingerprint, { recursive: true });
+  await writeFile(join(projectRoot, 'package.json'), '{}');
+  await writeFile(join(expo, 'package.json'), '{"name":"expo"}');
+  await writeFile(join(cli, 'package.json'), '{"name":"@expo/cli"}');
+  await writeFile(join(fingerprint, 'package.json'), '{"name":"@expo/fingerprint","main":"index.cjs"}');
+  await writeFile(join(fingerprint, 'index.cjs'), `exports.createFingerprintAsync = async () => ({hash: '${'b'.repeat(40)}'});`);
+  assert.equal(await provider.calculateFingerprintHash({ projectRoot }), 'b'.repeat(40));
+});
