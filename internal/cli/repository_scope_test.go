@@ -39,7 +39,7 @@ func TestIntegrationsRejectChangedRepositoryOrigin(t *testing.T) {
 
 func TestVMRouteUsesCurrentCloneActionsScope(t *testing.T) {
 	t.Setenv("GITHUB_REF", "")
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	setupClone := filepath.Join(root, "setup-clone")
 	featureClone := filepath.Join(root, "feature-clone")
 	initCLIRepository(t, setupClone, "main", "setup")
@@ -175,7 +175,7 @@ func TestVMRouteRejectsUnprovenDefaultRef(t *testing.T) {
 
 func TestTurboIntegrationPrefersMatchingCurrentClone(t *testing.T) {
 	t.Setenv("GITHUB_REF", "")
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	setupClone := filepath.Join(root, "setup-clone")
 	currentClone := filepath.Join(root, "current-clone")
 	initCLIRepository(t, setupClone, "main", "setup")

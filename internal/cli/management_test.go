@@ -191,7 +191,7 @@ func TestSetupPreviewReportsRedactedIntentWithoutWrites(t *testing.T) {
 }
 
 func TestSetupHumanPreviewExplainsTheIntendedInstallation(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	configPath := filepath.Join(root, "config.json")
 	dataDir := filepath.Join(root, "cache")
 	stdout, _ := runCLI(t,
@@ -765,7 +765,7 @@ func setupLocalConfig(t *testing.T) (string, string) {
 
 func setupConfigWithAddress(t *testing.T, address, token string) (string, string) {
 	t.Helper()
-	root := t.TempDir()
+	root := canonicalTestTempDir(t)
 	configPath := filepath.Join(root, "config.json")
 	dataDir := filepath.Join(root, "cache")
 	runCLI(t,
@@ -774,6 +774,15 @@ func setupConfigWithAddress(t *testing.T, address, token string) (string, string
 		"--non-interactive", "--json",
 	)
 	return configPath, dataDir
+}
+
+func canonicalTestTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func runCLI(t *testing.T, args ...string) (string, string) {

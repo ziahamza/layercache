@@ -831,7 +831,7 @@ func ensureOwnershipMarker(cfg config.Config, configPath string) error {
 	if cfg.InstallationID == "" {
 		return errors.New("installationId is required to own Local Cache files")
 	}
-	absoluteConfigPath, err := filepath.Abs(configPath)
+	absoluteConfigPath, err := canonicalSetupConfigPath(configPath)
 	if err != nil {
 		return fmt.Errorf("resolve configuration path: %w", err)
 	}
@@ -884,7 +884,7 @@ func ensureOwnershipMarker(cfg config.Config, configPath string) error {
 }
 
 func markPreservedCache(cfg config.Config, configPath string) error {
-	absoluteConfigPath, err := filepath.Abs(configPath)
+	absoluteConfigPath, err := canonicalSetupConfigPath(configPath)
 	if err != nil {
 		return fmt.Errorf("resolve configuration path: %w", err)
 	}
@@ -918,7 +918,7 @@ func rejectOwnershipConflict(cfg config.Config, configPath string) error {
 	if err := json.Unmarshal(data, &marker); err != nil {
 		return fmt.Errorf("decode existing Local Cache ownership marker: %w", err)
 	}
-	absoluteConfigPath, err := filepath.Abs(configPath)
+	absoluteConfigPath, err := canonicalSetupConfigPath(configPath)
 	if err != nil {
 		return fmt.Errorf("resolve configuration path: %w", err)
 	}
@@ -936,7 +936,7 @@ func verifyOwnershipMarker(cfg config.Config, configPath string) error {
 	if cfg.InstallationID == "" {
 		return errors.New("configuration has no installation ownership identity")
 	}
-	absoluteConfigPath, err := filepath.Abs(configPath)
+	absoluteConfigPath, err := canonicalSetupConfigPath(configPath)
 	if err != nil {
 		return fmt.Errorf("resolve configuration path: %w", err)
 	}

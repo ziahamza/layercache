@@ -18,6 +18,10 @@ func TestSetupMakesHostCacheVisibleThroughStatus(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(root, "config.json")
 	dataDir := filepath.Join(root, "cache")
 

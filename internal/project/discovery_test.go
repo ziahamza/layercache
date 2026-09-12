@@ -11,7 +11,13 @@ import (
 )
 
 func TestDiscoverNormalizesGitHubIdentityAndRefs(t *testing.T) {
+	t.Setenv("GITHUB_REF", "")
+	t.Setenv("GITHUB_SHA", "")
 	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	runGit(t, root, "init", "-b", "trunk")
 	runGit(t, root, "config", "user.email", "qa@layercache.dev")
 	runGit(t, root, "config", "user.name", "Layer Cache QA")
