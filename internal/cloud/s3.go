@@ -16,7 +16,14 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"golang.org/x/sync/semaphore"
 )
+
+// One budget across all projects in the process. Oversized S3 parts take the
+// entire budget, so they run alone rather than making large caches unsupported.
+const stagingBufferBudget = int64(256 << 20)
+
+var stagingBuffers = semaphore.NewWeighted(stagingBufferBudget)
 
 type s3BlobStore struct {
 	client    *minio.Client
@@ -73,11 +80,23 @@ func (storage *s3BlobStore) Stage(
 	if maximum < 0 || maximum == int64(^uint64(0)>>1) {
 		return stagedBlob{}, errors.New("invalid staged blob size limit")
 	}
+	// Unknown-length PutObject defaults to a 528 MiB part, even for tiny bodies.
+	// Plan against admission instead, preserving S3's 5 TiB object ceiling.
+	_, partSize, _, err := minio.OptimalPartInfo(max(16<<20, min(maximum+1, 5<<40)), 0)
+	if err != nil {
+		return stagedBlob{}, err
+	}
+	weight := min(partSize, stagingBufferBudget)
+	if err := stagingBuffers.Acquire(ctx, weight); err != nil {
+		return stagedBlob{}, err
+	}
+	defer stagingBuffers.Release(weight)
 	hasher := sha256.New()
 	limited := &io.LimitedReader{R: body, N: maximum + 1}
 	reader := io.TeeReader(limited, hasher)
 	info, err := storage.client.PutObject(ctx, storage.bucket, key, reader, -1, minio.PutObjectOptions{
 		ContentType: mediaType,
+		PartSize:    uint64(partSize),
 		UserMetadata: map[string]string{
 			"layercache-namespace": storage.namespace,
 			"layercache-state":     "staged",

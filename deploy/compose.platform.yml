@@ -11,6 +11,8 @@ services:
     mem_limit: 2g
     memswap_limit: 2g
     cpus: 2.0
+    environment:
+      GOMEMLIMIT: 1GiB
     pids_limit: 128
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
