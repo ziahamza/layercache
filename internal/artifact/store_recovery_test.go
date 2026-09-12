@@ -356,8 +356,10 @@ func TestOpenReconcilesOnlyUnreferencedCanonicalBlobFiles(t *testing.T) {
 	writeRecoveryFile(t, orphanPath, []byte("unreferenced bytes"))
 
 	filesToPreserve := map[string][]byte{
-		filepath.Join(root, "blobs", "sha256", "ab", "short-name"):                     []byte("malformed digest name"),
-		filepath.Join(root, "blobs", "sha256", "AB", strings.Repeat("a", 62)):          []byte("uppercase shard"),
+		filepath.Join(root, "blobs", "sha256", "ab", "short-name"): []byte("malformed digest name"),
+		// Keep the uppercase shard distinct from the lowercase "ab" fixture:
+		// on case-insensitive filesystems those paths otherwise name one shard.
+		filepath.Join(root, "blobs", "sha256", "BC", strings.Repeat("a", 62)):          []byte("uppercase shard"),
 		filepath.Join(root, "blobs", "sha256", "cd", strings.Repeat("E", 62)):          []byte("uppercase digest suffix"),
 		filepath.Join(root, "blobs", "sha256", strings.Repeat("f", 64)):                []byte("missing shard directory"),
 		filepath.Join(root, "blobs", "other-layout", "ab", strings.Repeat("1", 62)):    []byte("outside sha256 layout"),
