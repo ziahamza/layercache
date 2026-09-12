@@ -1,0 +1,50 @@
+name: Cache performance
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Calibrated Local and Team Cache performance / ${{ matrix.fixture }}
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [turbo-minimum, turbo]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.13"
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24.13.0"
+      - name: Install the pinned Turbo client and build candidate
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+        run: |
+          npm install --global pnpm@10.34.5
+          pnpm --dir "qa/fixtures/$FIXTURE" install --frozen-lockfile
+          go build -trimpath -buildvcs=true -o "$RUNNER_TEMP/layercache-performance" ./cmd/layercache
+      - name: Require repeated warm builds to meet the median performance gate
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+        run: |
+          go run ./qa/performance \
+            --binary "$RUNNER_TEMP/layercache-performance" \
+            --turbo "$GITHUB_WORKSPACE/qa/fixtures/$FIXTURE/node_modules/.bin/turbo" \
+            --sources local,team --samples 11 \
+            --output "$RUNNER_TEMP/layercache-performance.json"
+      - name: Preserve measurements and reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-performance-${{ matrix.fixture }}-${{ github.sha }}
+          path: ${{ runner.temp }}/layercache-performance.json
+          if-no-files-found: warn
+          retention-days: 30

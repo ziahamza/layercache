@@ -20,6 +20,19 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const (
+	actionsReservationTTL     = 24 * time.Hour
+	actionsReservationSweep   = time.Minute
+	actionsTeamRetryMinimum   = time.Second
+	actionsTeamRetryMaximum   = 5 * time.Minute
+	actionsTeamAttemptTimeout = 10 * time.Minute
+	actionsTeamAbortTimeout   = 5 * time.Second
+	actionsTeamIdlePoll       = 5 * time.Second
+	actionsTeamShutdownDrain  = 10 * time.Second
+	actionsTeamStatsTimeout   = 2 * time.Second
+	actionsTeamPinNamespace   = "actions-team-publication"
+)
+
 type PersistentStorage struct {
 	db        *sql.DB
 	artifacts *artifact.Store
@@ -28,6 +41,31 @@ type PersistentStorage struct {
 	inflight  map[int64]map[int64]*inflightUpload
 	leases    map[int64]map[int64]*artifact.StagingLease
 	closed    bool
+
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	team              CacheWriter
+	teamCancel        context.CancelFunc
+	teamDone          chan struct{}
+	teamWake          chan struct{}
+}
+
+type teamPublicationJob struct {
+	entryID       int64
+	repository    string
+	compatibility string
+	ref           string
+	key           string
+	version       string
+	size          int64
+	attempts      int
+}
+
+// TeamPublicationStats describes durable Actions archives that have committed
+// locally but have not yet finished publishing to Team Cache.
+type TeamPublicationStats struct {
+	PendingJobs  int64
+	PendingBytes int64
 }
 
 type inflightUpload struct {
@@ -103,10 +141,25 @@ func OpenPersistentStorage(ctx context.Context, root string, artifacts *artifact
 			version TEXT NOT NULL,
 			size INTEGER NOT NULL,
 			created_at INTEGER NOT NULL,
+			producer_duration_ns INTEGER,
 			origin TEXT NOT NULL DEFAULT 'localCache',
 			public_metadata_json BLOB
 		)`,
 		`CREATE INDEX IF NOT EXISTS actions_lookup ON actions_entries(repository, compatibility, ref_scope, version, created_at)`,
+		`CREATE TABLE IF NOT EXISTS actions_team_publications (
+			entry_id INTEGER PRIMARY KEY,
+			repository TEXT NOT NULL,
+			compatibility TEXT NOT NULL,
+			ref_scope TEXT NOT NULL,
+			cache_key TEXT NOT NULL,
+			version TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt INTEGER NOT NULL,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS actions_team_publications_due ON actions_team_publications(next_attempt, entry_id)`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			db.Close()
@@ -121,22 +174,62 @@ func OpenPersistentStorage(ctx context.Context, root string, artifacts *artifact
 		db.Close()
 		return nil, err
 	}
+	if err := ensureActionsEntryColumn(ctx, db, "producer_duration_ns", `ALTER TABLE actions_entries ADD COLUMN producer_duration_ns INTEGER`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := ensureActionsReservationColumn(ctx, db, "maximum_size", `ALTER TABLE actions_reservations ADD COLUMN maximum_size INTEGER`); err != nil {
 		db.Close()
 		return nil, err
 	}
-	if err := discardIncompleteUploads(ctx, db, staging); err != nil {
+	if err := discardIncompleteUploads(ctx, db, staging, artifacts); err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &PersistentStorage{
+	if err := reconcileActionsTeamPublicationPins(ctx, db, artifacts); err != nil {
+		db.Close()
+		return nil, err
+	}
+	storage := &PersistentStorage{
 		db: db, artifacts: artifacts, staging: staging,
-		inflight: make(map[int64]map[int64]*inflightUpload),
-		leases:   make(map[int64]map[int64]*artifact.StagingLease),
-	}, nil
+		inflight:        make(map[int64]map[int64]*inflightUpload),
+		leases:          make(map[int64]map[int64]*artifact.StagingLease),
+		maintenanceDone: make(chan struct{}),
+		teamWake:        make(chan struct{}, 1),
+	}
+	maintenanceContext, cancel := context.WithCancel(context.Background())
+	storage.maintenanceCancel = cancel
+	go storage.runReservationMaintenance(maintenanceContext)
+	return storage, nil
 }
 
-func discardIncompleteUploads(ctx context.Context, db *sql.DB, staging string) error {
+func discardIncompleteUploads(ctx context.Context, db *sql.DB, staging string, artifacts *artifact.Store) error {
+	rows, err := db.QueryContext(ctx, `SELECT repository, compatibility, ref_scope, cache_key, version FROM actions_reservations`)
+	if err != nil {
+		return fmt.Errorf("inspect incomplete Actions cache uploads: %w", err)
+	}
+	var orphaned []artifact.Key
+	for rows.Next() {
+		var key artifact.Key
+		key.Integration = "actions"
+		if err := rows.Scan(&key.Project, &key.Compatibility, &key.Ref, &key.Native, &key.Version); err != nil {
+			rows.Close()
+			return fmt.Errorf("read incomplete Actions cache upload: %w", err)
+		}
+		orphaned = append(orphaned, key)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read incomplete Actions cache uploads: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, key := range orphaned {
+		if err := artifacts.Delete(ctx, key); err != nil && !errors.Is(err, artifact.ErrNotFound) {
+			return fmt.Errorf("discard orphaned Actions cache artifact: %w", err)
+		}
+	}
 	if err := os.RemoveAll(staging); err != nil {
 		return fmt.Errorf("discard incomplete Actions cache staging: %w", err)
 	}
@@ -165,18 +258,320 @@ func discardIncompleteUploads(ctx context.Context, db *sql.DB, staging string) e
 
 func (storage *PersistentStorage) Close() error {
 	storage.mu.Lock()
-	defer storage.mu.Unlock()
 	if storage.closed {
+		storage.mu.Unlock()
 		return nil
 	}
 	storage.closed = true
-	cleanupErr := discardIncompleteUploads(context.Background(), storage.db, storage.staging)
+	maintenanceCancel := storage.maintenanceCancel
+	teamCancel := storage.teamCancel
+	maintenanceDone := storage.maintenanceDone
+	teamDone := storage.teamDone
+	storage.mu.Unlock()
+	maintenanceCancel()
+	if teamCancel != nil {
+		teamCancel()
+	}
+	<-maintenanceDone
+	if teamDone != nil {
+		<-teamDone
+		drainContext, cancelDrain := context.WithTimeout(context.Background(), actionsTeamShutdownDrain)
+		_ = storage.drainDueTeamJobs(drainContext)
+		cancelDrain()
+	}
+
+	storage.mu.Lock()
+	defer storage.mu.Unlock()
+	cleanupErr := discardIncompleteUploads(context.Background(), storage.db, storage.staging, storage.artifacts)
 	if cleanupErr == nil {
 		for reservationID := range storage.leases {
 			storage.releaseReservationLeasesLocked(reservationID)
 		}
 	}
-	return errors.Join(cleanupErr, storage.db.Close())
+	pinErr := reconcileActionsTeamPublicationPins(context.Background(), storage.db, storage.artifacts)
+	return errors.Join(cleanupErr, pinErr, storage.db.Close())
+}
+
+func (storage *PersistentStorage) runReservationMaintenance(ctx context.Context) {
+	defer close(storage.maintenanceDone)
+	ticker := time.NewTicker(actionsReservationSweep)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			_ = storage.expireReservations(ctx, now.UTC().Add(-actionsReservationTTL))
+		}
+	}
+}
+
+// TeamPublicationStats returns a bounded snapshot of the durable publication
+// queue. Every row in actions_team_publications is pending until the Team Cache
+// accepts its immutable archive identity and the publisher deletes the row.
+func (storage *PersistentStorage) TeamPublicationStats(ctx context.Context) (TeamPublicationStats, error) {
+	queryContext, cancel := context.WithTimeout(ctx, actionsTeamStatsTimeout)
+	defer cancel()
+
+	var stats TeamPublicationStats
+	err := storage.db.QueryRowContext(queryContext, `SELECT COUNT(*), COALESCE(SUM(size), 0)
+		FROM actions_team_publications`).Scan(&stats.PendingJobs, &stats.PendingBytes)
+	if err != nil {
+		return TeamPublicationStats{}, fmt.Errorf("read Actions Team Cache publication stats: %w", err)
+	}
+	return stats, nil
+}
+
+// EnableTeamPublication starts the durable Team Cache publisher. Commits add a
+// queue row in the same SQLite transaction that exposes their Actions entry.
+// The publisher retries until the Team Cache accepts the immutable identity.
+func (storage *PersistentStorage) EnableTeamPublication(team CacheWriter) error {
+	if team == nil {
+		return errors.New("Team Cache writer is required")
+	}
+	storage.mu.Lock()
+	defer storage.mu.Unlock()
+	if storage.closed {
+		return errors.New("Actions cache storage is closed")
+	}
+	if storage.team != nil {
+		return errors.New("Actions Team Cache publisher is already configured")
+	}
+	storage.team = team
+	teamContext, cancel := context.WithCancel(context.Background())
+	storage.teamCancel = cancel
+	storage.teamDone = make(chan struct{})
+	go storage.runTeamPublisher(teamContext)
+	select {
+	case storage.teamWake <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (storage *PersistentStorage) runTeamPublisher(ctx context.Context) {
+	defer close(storage.teamDone)
+	ticker := time.NewTicker(actionsTeamIdlePoll)
+	defer ticker.Stop()
+	for {
+		if _, err := storage.publishNextTeamJob(ctx, true); err != nil && ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-storage.teamWake:
+		case <-ticker.C:
+		}
+	}
+}
+
+func (storage *PersistentStorage) drainDueTeamJobs(ctx context.Context) error {
+	for {
+		attempted, err := storage.publishNextTeamJob(ctx, false)
+		if err != nil || !attempted {
+			return err
+		}
+	}
+}
+
+func (storage *PersistentStorage) publishNextTeamJob(ctx context.Context, recordRetry bool) (bool, error) {
+	job, found, err := storage.nextTeamJob(ctx, time.Now().UTC())
+	if err != nil || !found {
+		return false, err
+	}
+	attemptContext, cancel := context.WithTimeout(ctx, actionsTeamAttemptTimeout)
+	err = storage.publishTeamJob(attemptContext, job)
+	cancel()
+	if err == nil || errors.Is(err, ErrAlreadyExists) {
+		_, deleteErr := storage.db.ExecContext(ctx, `DELETE FROM actions_team_publications WHERE entry_id = ?`, job.entryID)
+		if deleteErr != nil {
+			return true, deleteErr
+		}
+		unpinErr := storage.artifacts.Unpin(ctx, actionsTeamPinNamespace, actionsTeamPublicationOwner(job.entryID))
+		select {
+		case storage.teamWake <- struct{}{}:
+		default:
+		}
+		return true, unpinErr
+	}
+	if !recordRetry {
+		return true, err
+	}
+	delay := actionsTeamRetryMinimum
+	for attempt := 0; attempt < job.attempts && delay < actionsTeamRetryMaximum; attempt++ {
+		delay *= 2
+		if delay > actionsTeamRetryMaximum {
+			delay = actionsTeamRetryMaximum
+		}
+	}
+	message := err.Error()
+	if len(message) > 4<<10 {
+		message = message[:4<<10]
+	}
+	_, updateErr := storage.db.ExecContext(ctx, `UPDATE actions_team_publications
+		SET attempts = attempts + 1, next_attempt = ?, last_error = ? WHERE entry_id = ?`,
+		time.Now().UTC().Add(delay).UnixNano(), message, job.entryID)
+	return true, updateErr
+}
+
+func (storage *PersistentStorage) nextTeamJob(ctx context.Context, now time.Time) (teamPublicationJob, bool, error) {
+	var job teamPublicationJob
+	err := storage.db.QueryRowContext(ctx, `SELECT entry_id, repository, compatibility, ref_scope, cache_key, version, size, attempts
+		FROM actions_team_publications WHERE next_attempt <= ? ORDER BY next_attempt, entry_id LIMIT 1`, now.UnixNano()).Scan(
+		&job.entryID, &job.repository, &job.compatibility, &job.ref, &job.key, &job.version, &job.size, &job.attempts,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return teamPublicationJob{}, false, nil
+	}
+	if err != nil {
+		return teamPublicationJob{}, false, err
+	}
+	return job, true, nil
+}
+
+func reconcileActionsTeamPublicationPins(ctx context.Context, db *sql.DB, artifacts *artifact.Store) error {
+	rows, err := db.QueryContext(ctx, `SELECT entry_id, repository, compatibility, ref_scope, cache_key, version, size, attempts
+		FROM actions_team_publications ORDER BY entry_id`)
+	if err != nil {
+		return fmt.Errorf("read queued Actions Team Cache publications for pin reconciliation: %w", err)
+	}
+	var pins []artifact.Pin
+	for rows.Next() {
+		var job teamPublicationJob
+		if err := rows.Scan(&job.entryID, &job.repository, &job.compatibility, &job.ref,
+			&job.key, &job.version, &job.size, &job.attempts); err != nil {
+			rows.Close()
+			return fmt.Errorf("read queued Actions Team Cache publication for pin reconciliation: %w", err)
+		}
+		key := actionsTeamPublicationArtifactKey(job)
+		entry, err := artifacts.Head(ctx, key)
+		if errors.Is(err, artifact.ErrNotFound) {
+			// Keep the durable queue row. The publisher will record and retry the
+			// missing-artifact failure instead of declaring the job complete.
+			continue
+		}
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("read queued Actions Team Cache artifact for pin reconciliation: %w", err)
+		}
+		pins = append(pins, artifact.Pin{
+			Owner: actionsTeamPublicationOwner(job.entryID), Key: key,
+			Digest: entry.Digest, Size: entry.Size,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read queued Actions Team Cache publications for pin reconciliation: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := artifacts.ReconcilePins(ctx, actionsTeamPinNamespace, pins); err != nil {
+		return fmt.Errorf("reconcile queued Actions Team Cache artifact pins: %w", err)
+	}
+	return nil
+}
+
+func actionsTeamPublicationArtifactKey(job teamPublicationJob) artifact.Key {
+	return artifact.Key{
+		Integration: "actions", Project: job.repository, Compatibility: job.compatibility,
+		Native: job.key, Version: job.version, Ref: job.ref,
+	}
+}
+
+func actionsTeamPublicationOwner(entryID int64) string {
+	return fmt.Sprintf("entry-%d", entryID)
+}
+
+func (storage *PersistentStorage) publishTeamJob(ctx context.Context, job teamPublicationJob) error {
+	scope := Scope{
+		Repository: job.repository, Compatibility: job.compatibility,
+		Ref: job.ref, DefaultRef: job.ref,
+	}
+	archive, err := storage.Open(ctx, OpenRequest{Scope: scope, ID: job.entryID})
+	if err != nil {
+		return err
+	}
+	defer archive.Body.Close()
+	reservation, err := storage.team.Reserve(ctx, ReserveRequest{
+		Scope: scope, Key: job.key, Version: job.version, CacheSize: &job.size,
+	})
+	if errors.Is(err, ErrAlreadyExists) {
+		reader, ok := storage.team.(CacheReader)
+		if !ok {
+			return err
+		}
+		result, lookupErr := reader.Lookup(ctx, LookupRequest{Scope: scope, Keys: []string{job.key}, Version: job.version})
+		if lookupErr == nil && result.Match == MatchExact && result.Entry.Key == job.key {
+			return ErrAlreadyExists
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, ErrNotFound) {
+			return lookupErr
+		}
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if aborter, ok := storage.team.(reservationAborter); ok {
+			abortContext, cancelAbort := context.WithTimeout(context.Background(), actionsTeamAbortTimeout)
+			_ = aborter.Abort(abortContext, reservation.ID)
+			cancelAbort()
+		}
+	}()
+	if _, err := uploadArchive(ctx, storage.team, reservation.ID, &scope, archive.Body, job.size); err != nil {
+		return err
+	}
+	if _, err := storage.team.Commit(ctx, CommitRequest{
+		ReservationID: reservation.ID, Scope: &scope, Size: job.size,
+		ProducerDuration: cloneDuration(archive.Entry.ProducerDuration),
+	}); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (storage *PersistentStorage) expireReservations(ctx context.Context, cutoff time.Time) error {
+	storage.mu.Lock()
+	defer storage.mu.Unlock()
+	if storage.closed {
+		return nil
+	}
+	rows, err := storage.db.QueryContext(ctx, `SELECT id FROM actions_reservations WHERE created_at <= ? ORDER BY id`, cutoff.UnixNano())
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	var cleanupErr error
+	for _, id := range ids {
+		if len(storage.inflight[id]) != 0 {
+			continue
+		}
+		cleanupErr = errors.Join(cleanupErr, storage.removeReservationLocked(ctx, id))
+	}
+	return cleanupErr
 }
 
 // ArtifactStore exposes the Local Cache admission backend to integrations that
@@ -201,12 +596,13 @@ func (storage *PersistentStorage) Lookup(ctx context.Context, request LookupRequ
 		}
 		for _, requestedKey := range request.Keys {
 			for _, entry := range entries {
-				if entry.Key == requestedKey {
+				if entry.Key == requestedKey &&
+					(entry.Public == nil || requestedKey == request.Keys[0]) {
 					return LookupResult{Entry: entry, Match: MatchExact, RequestedKey: requestedKey, RefScope: ref.scope, Source: SourceLocalCache}, nil
 				}
 			}
 			for _, entry := range entries {
-				if strings.HasPrefix(entry.Key, requestedKey) {
+				if entry.Public == nil && strings.HasPrefix(entry.Key, requestedKey) {
 					return LookupResult{Entry: entry, Match: MatchPrefix, RequestedKey: requestedKey, RefScope: ref.scope, Source: SourceLocalCache}, nil
 				}
 			}
@@ -496,11 +892,26 @@ func (storage *PersistentStorage) finishUpload(reservationID int64, upload *infl
 // Abort removes an incomplete reservation and releases all of its retained
 // staging bytes. It is intended for internal transfers that cannot be retried.
 func (storage *PersistentStorage) Abort(ctx context.Context, reservationID int64) error {
+	return storage.AbortScoped(ctx, reservationID, nil)
+}
+
+func (storage *PersistentStorage) AbortScoped(ctx context.Context, reservationID int64, scope *Scope) error {
 	storage.mu.Lock()
 	defer storage.mu.Unlock()
 	if len(storage.inflight[reservationID]) != 0 {
 		return ErrInvalidUpload
 	}
+	reservation, err := storage.reservation(ctx, reservationID)
+	if err != nil {
+		return err
+	}
+	if !reservationScopeMatches(scope, reservation.repository, reservation.compatibility, reservation.ref) {
+		return ErrNotFound
+	}
+	return storage.removeReservationLocked(ctx, reservationID)
+}
+
+func (storage *PersistentStorage) removeReservationLocked(ctx context.Context, reservationID int64) error {
 	removeErr := os.RemoveAll(filepath.Join(storage.staging, fmt.Sprint(reservationID)))
 	if removeErr == nil {
 		defer storage.releaseReservationLeasesLocked(reservationID)
@@ -687,6 +1098,7 @@ func (storage *PersistentStorage) Commit(ctx context.Context, request CommitRequ
 	if err != nil {
 		return Entry{}, err
 	}
+	queueTeamPublication := storage.team != nil && origin == SourceLocalCache
 	var publicMetadataJSON []byte
 	if publicMetadata != nil {
 		publicMetadataJSON, err = json.Marshal(publicMetadata)
@@ -713,8 +1125,13 @@ func (storage *PersistentStorage) Commit(ctx context.Context, request CommitRequ
 	if err != nil {
 		return Entry{}, err
 	}
+	metadataCommitted := false
+	defer func() {
+		if !metadataCommitted {
+			_ = storage.artifacts.Delete(context.Background(), key)
+		}
+	}()
 	if publicMetadata != nil && (artifactEntry.Digest != publicMetadata.Digest || artifactEntry.Size != publicMetadata.Size) {
-		_ = storage.artifacts.Delete(ctx, key)
 		return Entry{}, ErrInvalidUpload
 	}
 	createdAt := time.Now().UTC()
@@ -724,9 +1141,11 @@ func (storage *PersistentStorage) Commit(ctx context.Context, request CommitRequ
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO actions_entries(
-		id, repository, compatibility, ref_scope, cache_key, version, size, created_at, origin, public_metadata_json
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, reservation.id, reservation.repository, reservation.compatibility,
-		reservation.ref, reservation.key, reservation.version, request.Size, createdAt.UnixNano(), origin, publicMetadataJSON); err != nil {
+		id, repository, compatibility, ref_scope, cache_key, version, size, created_at,
+		producer_duration_ns, origin, public_metadata_json
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, reservation.id, reservation.repository, reservation.compatibility,
+		reservation.ref, reservation.key, reservation.version, request.Size, createdAt.UnixNano(),
+		durationNanoseconds(request.ProducerDuration), origin, publicMetadataJSON); err != nil {
 		return Entry{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM actions_chunks WHERE reservation_id = ?`, reservation.id); err != nil {
@@ -738,14 +1157,45 @@ func (storage *PersistentStorage) Commit(ctx context.Context, request CommitRequ
 	if _, err := tx.ExecContext(ctx, `UPDATE actions_identities SET committed = 1 WHERE reservation_id = ?`, reservation.id); err != nil {
 		return Entry{}, err
 	}
+	if queueTeamPublication {
+		now := time.Now().UTC().UnixNano()
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO actions_team_publications(
+			entry_id, repository, compatibility, ref_scope, cache_key, version, size, attempts, next_attempt, last_error, created_at
+		) VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, '', ?)`, reservation.id, reservation.repository,
+			reservation.compatibility, reservation.ref, reservation.key, reservation.version, request.Size, now, now); err != nil {
+			return Entry{}, fmt.Errorf("queue Actions Team Cache publication: %w", err)
+		}
+		pin := artifact.Pin{
+			Owner:  actionsTeamPublicationOwner(reservation.id),
+			Key:    key,
+			Digest: artifactEntry.Digest,
+			Size:   artifactEntry.Size,
+		}
+		if err := storage.artifacts.Pin(ctx, actionsTeamPinNamespace, pin); err != nil {
+			return Entry{}, fmt.Errorf("pin queued Actions Team Cache artifact: %w", err)
+		}
+		defer func() {
+			if !metadataCommitted {
+				_ = storage.artifacts.Unpin(context.Background(), actionsTeamPinNamespace, pin.Owner)
+			}
+		}()
+	}
 	if err := tx.Commit(); err != nil {
 		return Entry{}, err
 	}
+	metadataCommitted = true
 	_ = os.RemoveAll(filepath.Join(storage.staging, fmt.Sprint(reservation.id)))
 	storage.releaseReservationLeasesLocked(reservation.id)
+	if queueTeamPublication {
+		select {
+		case storage.teamWake <- struct{}{}:
+		default:
+		}
+	}
 	return Entry{
 		ID: reservation.id, Key: reservation.key, Version: reservation.version, Ref: reservation.ref,
-		Size: request.Size, CreatedAt: createdAt, Origin: origin, Public: clonePublicEntryMetadata(publicMetadata),
+		Size: request.Size, CreatedAt: createdAt, ProducerDuration: cloneDuration(request.ProducerDuration),
+		Origin: origin, Public: clonePublicEntryMetadata(publicMetadata),
 	}, nil
 }
 
@@ -753,14 +1203,15 @@ func (storage *PersistentStorage) Open(ctx context.Context, request OpenRequest)
 	var entry Entry
 	var compatibility, repository string
 	var createdAt int64
+	var producerDuration sql.NullInt64
 	var publicMetadataJSON []byte
 	err := storage.db.QueryRowContext(ctx, `SELECT id, cache_key, version, ref_scope, size, created_at, repository, compatibility,
-		origin, public_metadata_json
+		producer_duration_ns, origin, public_metadata_json
 		FROM actions_entries WHERE id = ? AND repository = ? AND compatibility = ?
 		AND (ref_scope = ? OR ref_scope = ?)`, request.ID, request.Scope.Repository, request.Scope.Compatibility,
 		request.Scope.Ref, request.Scope.DefaultRef).Scan(
 		&entry.ID, &entry.Key, &entry.Version, &entry.Ref, &entry.Size, &createdAt, &repository, &compatibility,
-		&entry.Origin, &publicMetadataJSON,
+		&producerDuration, &entry.Origin, &publicMetadataJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Archive{}, ErrNotFound
@@ -769,6 +1220,7 @@ func (storage *PersistentStorage) Open(ctx context.Context, request OpenRequest)
 		return Archive{}, err
 	}
 	entry.CreatedAt = time.Unix(0, createdAt).UTC()
+	entry.ProducerDuration = durationFromNullInt64(producerDuration)
 	if err := decodePublicEntryMetadata(publicMetadataJSON, &entry, repository, compatibility); err != nil {
 		return Archive{}, err
 	}
@@ -793,7 +1245,8 @@ func (storage *PersistentStorage) Open(ctx context.Context, request OpenRequest)
 }
 
 func (storage *PersistentStorage) entriesFor(ctx context.Context, request LookupRequest, ref string) ([]Entry, error) {
-	rows, err := storage.db.QueryContext(ctx, `SELECT id, cache_key, version, ref_scope, size, created_at, origin, public_metadata_json
+	rows, err := storage.db.QueryContext(ctx, `SELECT id, cache_key, version, ref_scope, size, created_at,
+		producer_duration_ns, origin, public_metadata_json
 		FROM actions_entries WHERE repository = ? AND compatibility = ? AND ref_scope = ? AND version = ?
 		ORDER BY created_at DESC, id DESC`, request.Scope.Repository, request.Scope.Compatibility, ref, request.Version)
 	if err != nil {
@@ -804,11 +1257,14 @@ func (storage *PersistentStorage) entriesFor(ctx context.Context, request Lookup
 	for rows.Next() {
 		var entry Entry
 		var createdAt int64
+		var producerDuration sql.NullInt64
 		var publicMetadataJSON []byte
-		if err := rows.Scan(&entry.ID, &entry.Key, &entry.Version, &entry.Ref, &entry.Size, &createdAt, &entry.Origin, &publicMetadataJSON); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.Key, &entry.Version, &entry.Ref, &entry.Size, &createdAt,
+			&producerDuration, &entry.Origin, &publicMetadataJSON); err != nil {
 			return nil, err
 		}
 		entry.CreatedAt = time.Unix(0, createdAt).UTC()
+		entry.ProducerDuration = durationFromNullInt64(producerDuration)
 		if err := decodePublicEntryMetadata(publicMetadataJSON, &entry, request.Scope.Repository, request.Scope.Compatibility); err != nil {
 			return nil, err
 		}
@@ -826,7 +1282,10 @@ func (storage *PersistentStorage) entriesFor(ctx context.Context, request Lookup
 			Integration: "actions", Project: request.Scope.Repository, Compatibility: request.Scope.Compatibility,
 			Native: entry.Key, Version: entry.Version, Ref: entry.Ref,
 		}
-		artifactEntry, err := storage.artifacts.Head(ctx, key)
+		artifactEntry, file, err := storage.artifacts.Get(ctx, key)
+		if file != nil {
+			_ = file.Close()
+		}
 		if errors.Is(err, artifact.ErrNotFound) || errors.Is(err, artifact.ErrCorrupt) {
 			if invalidateErr := storage.InvalidateEntry(ctx, entry.ID); invalidateErr != nil && !errors.Is(invalidateErr, ErrNotFound) {
 				return nil, invalidateErr
@@ -849,6 +1308,15 @@ func (storage *PersistentStorage) entriesFor(ctx context.Context, request Lookup
 func (storage *PersistentStorage) InvalidateEntry(ctx context.Context, id int64) error {
 	storage.mu.Lock()
 	defer storage.mu.Unlock()
+	var queued int
+	if err := storage.db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM actions_team_publications WHERE entry_id = ?
+	)`, id).Scan(&queued); err != nil {
+		return err
+	}
+	if queued != 0 {
+		return artifact.ErrPinned
+	}
 	var key artifact.Key
 	err := storage.db.QueryRowContext(ctx, `SELECT repository, compatibility, cache_key, version, ref_scope
 		FROM actions_entries WHERE id = ?`, id).Scan(&key.Project, &key.Compatibility, &key.Native, &key.Version, &key.Ref)
@@ -939,6 +1407,10 @@ func decodePublicEntryMetadata(encoded []byte, entry *Entry, repository, compati
 	if entry.Origin != SourcePublicCache {
 		return errors.New("Actions Public Cache metadata has a non-Public origin")
 	}
+	if metadata.Request.CacheIdentity == "" || metadata.Envelope.Payload == "" || metadata.PublicIdentity == "" ||
+		metadata.Digest == "" || metadata.ExpiresAt.IsZero() {
+		return errors.New("Actions Public Cache origin has incomplete signed metadata")
+	}
 	request := metadata.Request
 	if request.Repository != repository || request.Compatibility != compatibility ||
 		request.Ref != entry.Ref || request.Key != entry.Key || request.Version != entry.Version ||
@@ -981,6 +1453,14 @@ func ensureActionsEntryColumn(ctx context.Context, db *sql.DB, name, statement s
 		return fmt.Errorf("migrate Actions cache metadata column %s: %w", name, err)
 	}
 	return nil
+}
+
+func durationFromNullInt64(value sql.NullInt64) *time.Duration {
+	if !value.Valid || value.Int64 < 0 {
+		return nil
+	}
+	duration := time.Duration(value.Int64)
+	return &duration
 }
 
 func ensureActionsReservationColumn(ctx context.Context, db *sql.DB, name, statement string) error {

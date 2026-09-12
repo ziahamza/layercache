@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +33,11 @@ func TestBuildxPlanUsesPersistentBuilderAndNativeRegistryCaches(t *testing.T) {
 			Path string   `json:"Path"`
 			Args []string `json:"Args"`
 		} `json:"Command"`
+		Promotion *struct {
+			Path string   `json:"Path"`
+			Args []string `json:"Args"`
+		} `json:"Promotion"`
+		TeamExportID string `json:"TeamExportID"`
 	}
 	if err := json.Unmarshal(output, &plan); err != nil {
 		t.Fatalf("decode Buildx plan: %v\n%s", err, output)
@@ -42,12 +49,30 @@ func TestBuildxPlanUsesPersistentBuilderAndNativeRegistryCaches(t *testing.T) {
 		"--builder", "layercache-fixture",
 		"--platform", "linux/amd64",
 		"--cache-from", "type=registry,ref=registry.test/team/acme/widget/linux-amd64:main",
-		"--cache-to", "type=registry,ref=registry.test/team/acme/widget/linux-amd64:build-run-123,mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true",
 		"--load", "--file", "Dockerfile", ".",
 	}
 	for _, argument := range wantArguments {
 		if !slices.Contains(plan.Command.Args, argument) {
 			t.Fatalf("Buildx arguments do not contain %q: %v", argument, plan.Command.Args)
+		}
+	}
+	if !regexp.MustCompile(`^run-123-u[0-9a-f]{32}$`).MatchString(plan.TeamExportID) {
+		t.Fatalf("immutable Team export ID = %q", plan.TeamExportID)
+	}
+	cacheTo := "type=registry,ref=registry.test/team/acme/widget/linux-amd64:build-" + plan.TeamExportID + ",mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true"
+	if !slices.Contains(plan.Command.Args, cacheTo) {
+		t.Fatalf("Buildx arguments do not contain randomized immutable export %q: %v", cacheTo, plan.Command.Args)
+	}
+	if plan.Promotion == nil || plan.Promotion.Path != "docker" {
+		t.Fatalf("Buildx plan promotion = %#v", plan.Promotion)
+	}
+	promotion := strings.Join(plan.Promotion.Args, "\x00")
+	for _, value := range []string{
+		"registry.test/team/acme/widget/linux-amd64:main",
+		"registry.test/team/acme/widget/linux-amd64:build-" + plan.TeamExportID,
+	} {
+		if !strings.Contains(promotion, value) {
+			t.Fatalf("Buildx promotion does not contain %q: %v", value, plan.Promotion.Args)
 		}
 	}
 }

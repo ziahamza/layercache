@@ -4,7 +4,15 @@ This Node 24 action adapts the familiar `actions/cache` inputs to a Layer Cache 
 
 The action sends Team Cache requests through a compatibility-scoped endpoint. By default it derives `linux-amd64-schema1`, `linux-arm64-schema1`, or `darwin-arm64-schema1` from the Node job process. Set the optional `compatibility` input when libc, runtime, or toolchain ABI can change outputs, for example `linux-amd64-glibc2.39-node@24-schema1`. Identities are lowercase, at most 256 bytes, and may use `-_.:+@` delimiters.
 
-The action does not resolve Public Cache directly, so its `public-cache-mode` input must remain `disabled`. A Local Layer Cache endpoint may still provide transparent verified Public fallback. In that case, the daemon verifies the signed publication, archive digest, size, identity, provenance, and lease before it returns a normal v1 hit to the action. GitHub Actions cache v2 is not supported by the Layer Cache endpoint.
+Set `project` and grant the workflow `id-token: write` to use GitHub OIDC. The action requests an ID token with audience `layercache:<project>`, exchanges it at the Team Cache endpoint, and uses the returned 15-minute capability token. The `token` input remains available as a project-scoped secret fallback. Never supply a server administrator token to a workflow.
+
+`public-cache-mode: verified` enables Public Cache restores. Supply `public-trust-key`, `public-recipe-digest`, and `public-builder`; `public-platform` and `public-toolchain` have runner-specific defaults. Before changing the workspace, the action verifies the Ed25519 DSSE signature and the full repository, commit, recipe, target, platform, toolchain, builder, digest, and size identity. It hashes the complete download, rejects unsafe tar paths, link traversal, special files, duplicate members, and set-ID modes, then extracts the validated relative archive without `tar -P`.
+
+Verified lookup allows two seconds by default for connection and response metadata. Set `lookup-timeout-seconds` between 1 and 3600 when the deployment needs another bound. Archive reads retain a separate progress-based idle limit.
+
+OIDC exchange and cache service outages become warnings and cache misses by default, while invalid configuration and unsafe verified archives fail closed. `fail-on-cache-miss: true` also fails on authentication or restore unavailability, preserving the explicit fail-on-miss contract.
+
+Verified Public archives must contain workspace-relative paths. Cache paths outside `GITHUB_WORKSPACE` are rejected in verified mode. GitHub Actions cache v2 is not supported by the Layer Cache endpoint.
 
 ## Development
 

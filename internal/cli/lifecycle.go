@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,22 +11,30 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/layercache/layercache/internal/config"
+	"github.com/layercache/layercache/internal/publicbuild"
 )
 
 type runtimeStatus struct {
-	Running            bool   `json:"running"`
-	RuntimePID         int    `json:"runtimePid"`
-	RuntimeInstanceID  string `json:"runtimeInstanceId"`
-	UsageBytes         int64  `json:"usageBytes"`
-	Artifacts          int64  `json:"artifacts"`
-	Entries            int64  `json:"entries"`
-	PendingUploads     int64  `json:"pendingUploads"`
-	PendingUploadBytes int64  `json:"pendingUploadBytes"`
+	Running            bool                       `json:"running"`
+	Role               string                     `json:"role"`
+	ProjectID          string                     `json:"projectId"`
+	StartedAt          time.Time                  `json:"startedAt"`
+	RuntimePID         int                        `json:"runtimePid"`
+	RuntimeInstanceID  string                     `json:"runtimeInstanceId"`
+	UsageBytes         int64                      `json:"usageBytes"`
+	MaxBytes           int64                      `json:"maxBytes"`
+	EvictionPolicy     string                     `json:"evictionPolicy"`
+	Artifacts          int64                      `json:"artifacts"`
+	Entries            int64                      `json:"entries"`
+	PendingUploads     int64                      `json:"pendingUploads"`
+	PendingUploadBytes int64                      `json:"pendingUploadBytes"`
+	PublicBuild        *publicbuild.StatusSummary `json:"publicBuild,omitempty"`
 }
 
 type runtimeOwnership struct {
@@ -33,7 +42,7 @@ type runtimeOwnership struct {
 	InstanceID string `json:"instanceId"`
 }
 
-func runStart(args []string, stdout, stderr io.Writer) error {
+func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defaultPath, err := config.DefaultPath()
 	if err != nil {
 		return err
@@ -45,15 +54,25 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := config.Load(*configPath)
+	unlockConfiguration, err := lockConfiguration(ctx, *configPath)
 	if err != nil {
 		return err
 	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		unlockConfiguration()
+		return err
+	}
 	if live, err := probeRuntime(cfg); err == nil {
+		unlockConfiguration()
 		return printResult(stdout, *jsonOutput, map[string]any{
 			"running": true, "pid": live.RuntimePID, "runtimeInstanceId": live.RuntimeInstanceID, "alreadyRunning": true,
 		}, "Layer Cache is already running")
 	}
+	// Do not hold the configuration lock while the child starts: serve may
+	// need it to persist a refreshed capability. A second locked comparison
+	// below detects any mutation that won the startup race.
+	unlockConfiguration()
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("find Layer Cache executable: %w", err)
@@ -90,6 +109,21 @@ func runStart(args []string, stdout, stderr io.Writer) error {
 		terminateStartedChild(command)
 		return fmt.Errorf("Layer Cache runtime did not become healthy; inspect %s", filepath.Join(cfg.DataDir, "daemon.log"))
 	}
+	unlockConfiguration, err = lockConfiguration(ctx, *configPath)
+	if err != nil {
+		terminateStartedChild(command)
+		return err
+	}
+	defer unlockConfiguration()
+	current, err := config.Load(*configPath)
+	if err != nil {
+		terminateStartedChild(command)
+		return fmt.Errorf("reload Layer Cache configuration after runtime startup: %w", err)
+	}
+	if !reflect.DeepEqual(current, cfg) {
+		terminateStartedChild(command)
+		return errors.New("Layer Cache configuration changed while the runtime was starting; the new runtime was stopped, rerun start")
+	}
 	if err := writeRuntimeOwnership(cfg, runtimeOwnership{PID: pid, InstanceID: live.RuntimeInstanceID}); err != nil {
 		terminateStartedChild(command)
 		return fmt.Errorf("persist Layer Cache runtime ownership: %w", err)
@@ -121,7 +155,7 @@ func terminateStartedChild(command *exec.Cmd) {
 	}
 }
 
-func runStop(args []string, stdout, stderr io.Writer) error {
+func runStop(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defaultPath, err := config.DefaultPath()
 	if err != nil {
 		return err
@@ -133,6 +167,11 @@ func runStop(args []string, stdout, stderr io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	unlockConfiguration, err := lockConfiguration(ctx, *configPath)
+	if err != nil {
+		return err
+	}
+	defer unlockConfiguration()
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
@@ -192,12 +231,12 @@ func verifyRuntimeOwnership(ownership runtimeOwnership, live runtimeStatus) erro
 }
 
 func probeRuntime(cfg config.Config) (runtimeStatus, error) {
-	request, err := http.NewRequest(http.MethodGet, "http://"+cfg.Listen+"/v1/status", nil)
+	request, err := http.NewRequest(http.MethodGet, localRuntimeURL(cfg.Listen)+"/v1/status", nil)
 	if err != nil {
 		return runtimeStatus{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
-	client := &http.Client{Timeout: 300 * time.Millisecond}
+	client := newLocalCLIHTTPClient(300 * time.Millisecond)
 	response, err := client.Do(request)
 	if err != nil {
 		return runtimeStatus{}, err
@@ -211,6 +250,29 @@ func probeRuntime(cfg config.Config) (runtimeStatus, error) {
 		return runtimeStatus{}, err
 	}
 	return status, nil
+}
+
+func rejectConfigurationMutationWhileRuntimeActive(cfg config.Config) error {
+	ownership, ownershipErr := readRuntimeOwnership(cfg)
+	if ownershipErr == nil {
+		alive, err := processAlive(ownership.PID)
+		if err != nil {
+			return fmt.Errorf("inspect owned Layer Cache runtime before changing configuration: %w", err)
+		}
+		if alive {
+			return fmt.Errorf(
+				"refusing to change Layer Cache setup while owned runtime pid %d may still be running; stop it before changing configuration",
+				ownership.PID,
+			)
+		}
+	}
+	if live, err := probeRuntime(cfg); err == nil && live.Running {
+		return fmt.Errorf(
+			"refusing to change Layer Cache setup while runtime pid %d is running; stop it before changing configuration",
+			live.RuntimePID,
+		)
+	}
+	return nil
 }
 
 func readPID(cfg config.Config) (int, error) {

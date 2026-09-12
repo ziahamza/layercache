@@ -7,20 +7,28 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 const cacheChainTransferChunkSize = 4 << 20
+
+const maxTrackedCacheChainReservations = 4_096
+
+var errWarmRetry = errors.New("retry lookup after another cache warm completed")
+
+var errRemoteDegraded = errors.New("remote cache degraded")
 
 // CacheChain composes Local, Team, and optionally verified Public Caches
 // while preserving the v1 StorageIndex contract. Remote bytes become visible
 // through this index only after a complete Local Cache commit.
 type CacheChain struct {
-	local  StorageIndex
-	team   StorageIndex
-	public StorageIndex
+	local                  StorageIndex
+	team                   StorageIndex
+	public                 CacheReader
+	durableTeamPublication bool
 
 	mu           sync.Mutex
-	reservations map[int64]ReserveRequest
+	reservations map[int64]cacheChainReservation
 	warming      map[cacheChainIdentity]*warmCall
 }
 
@@ -30,6 +38,11 @@ type cacheChainIdentity struct {
 	ref           string
 	key           string
 	version       string
+}
+
+type cacheChainReservation struct {
+	request ReserveRequest
+	expires time.Time
 }
 
 type warmCall struct {
@@ -54,8 +67,16 @@ type reservationAborter interface {
 	Abort(context.Context, int64) error
 }
 
+type scopedReservationAborter interface {
+	AbortScoped(context.Context, int64, *Scope) error
+}
+
 type entryReleaser interface {
 	ReleaseEntry(context.Context, int64) error
+}
+
+type durableTeamPublisher interface {
+	EnableTeamPublication(CacheWriter) error
 }
 
 func NewCacheChain(local, team StorageIndex) (*CacheChain, error) {
@@ -65,15 +86,22 @@ func NewCacheChain(local, team StorageIndex) (*CacheChain, error) {
 	if team == nil {
 		return nil, errors.New("Team Cache storage is required")
 	}
-	return &CacheChain{
-		local: local, team: team, reservations: make(map[int64]ReserveRequest), warming: make(map[cacheChainIdentity]*warmCall),
-	}, nil
+	chain := &CacheChain{
+		local: local, team: team, reservations: make(map[int64]cacheChainReservation), warming: make(map[cacheChainIdentity]*warmCall),
+	}
+	if publisher, ok := local.(durableTeamPublisher); ok {
+		if err := publisher.EnableTeamPublication(team); err != nil {
+			return nil, fmt.Errorf("configure durable Actions Team Cache publication: %w", err)
+		}
+		chain.durableTeamPublication = true
+	}
+	return chain, nil
 }
 
 // NewCacheChainWithPublic adds a read-only, verified Public Cache after the
-// Local and Team Caches. Writes deliberately retain NewCacheChain semantics:
-// commit locally and publish best-effort to Team Cache only.
-func NewCacheChainWithPublic(local, team, public StorageIndex) (*CacheChain, error) {
+// Local and Team Caches. Writes commit locally and publish only to Team Cache.
+// Persistent Local Cache adapters use their durable retry queue.
+func NewCacheChainWithPublic(local, team StorageIndex, public CacheReader) (*CacheChain, error) {
 	if local == nil {
 		return nil, errors.New("Local Cache storage is required")
 	}
@@ -89,10 +117,19 @@ func NewCacheChainWithPublic(local, team, public StorageIndex) (*CacheChain, err
 	if _, ok := public.(publicEntryRevalidator); !ok {
 		return nil, errors.New("Public Cache storage must support warmed-entry revalidation")
 	}
-	return &CacheChain{
+	chain := &CacheChain{
 		local: local, team: team, public: public,
-		reservations: make(map[int64]ReserveRequest), warming: make(map[cacheChainIdentity]*warmCall),
-	}, nil
+		reservations: make(map[int64]cacheChainReservation), warming: make(map[cacheChainIdentity]*warmCall),
+	}
+	if team != nil {
+		if publisher, ok := local.(durableTeamPublisher); ok {
+			if err := publisher.EnableTeamPublication(team); err != nil {
+				return nil, fmt.Errorf("configure durable Actions Team Cache publication: %w", err)
+			}
+			chain.durableTeamPublication = true
+		}
+	}
+	return chain, nil
 }
 
 func (storage *CacheChain) Lookup(ctx context.Context, request LookupRequest) (LookupResult, error) {
@@ -102,15 +139,29 @@ func (storage *CacheChain) Lookup(ctx context.Context, request LookupRequest) (L
 		return LookupResult{}, fmt.Errorf("lookup Local Cache: %w", localErr)
 	}
 	if localFound && localResult.Entry.Public != nil {
-		refreshed, err := storage.revalidateWarmedPublic(ctx, localResult.Entry)
-		if err != nil {
+		if !publicEntryCoordinateMatchesLookup(localResult.Entry.Public, request.Scope, localResult.Entry) {
 			if invalidateErr := storage.invalidateLocalEntry(ctx, localResult.Entry.ID); invalidateErr != nil {
 				return LookupResult{}, fmt.Errorf("invalidate untrusted warmed Public Cache entry: %w", invalidateErr)
 			}
 			localFound = false
+		} else if !publicEntryMatchesLookup(localResult.Entry.Public, request.Scope, localResult.Entry) {
+			// The native Actions coordinate is occupied by a different valid
+			// Public provenance identity. Do not return its bytes and do not
+			// invalidate an archive another concurrent caller may be downloading.
+			// If this request resolves another publication below, warming it will
+			// fail closed while the coordinate remains occupied.
+			localFound = false
 		} else {
-			localResult.Entry.Public = refreshed
-			localResult.Entry.Origin = SourcePublicCache
+			refreshed, err := storage.revalidateWarmedPublic(ctx, localResult.Entry)
+			if err != nil {
+				if invalidateErr := storage.invalidateLocalEntry(ctx, localResult.Entry.ID); invalidateErr != nil {
+					return LookupResult{}, fmt.Errorf("invalidate untrusted warmed Public Cache entry: %w", invalidateErr)
+				}
+				localFound = false
+			} else {
+				localResult.Entry.Public = refreshed
+				localResult.Entry.Origin = SourcePublicCache
+			}
 		}
 	}
 	if localFound {
@@ -130,8 +181,12 @@ func (storage *CacheChain) Lookup(ctx context.Context, request LookupRequest) (L
 			teamResult.Source = SourceTeamCache
 			if (!localFound || lookupIsBetter(teamResult, localResult, request)) && isBestPossibleLookup(teamResult, request) {
 				warmedEntry, err := storage.warmLocalOnce(ctx, request, teamResult, storage.team, "Team Cache")
+				if errors.Is(err, errWarmRetry) {
+					return storage.Lookup(ctx, request)
+				}
 				if err != nil {
 					if localFound {
+						localResult.Degraded = true
 						return localResult, nil
 					}
 					return LookupResult{}, remoteFailureMiss(ctx, "warm Local Cache from Team Cache", err)
@@ -141,6 +196,7 @@ func (storage *CacheChain) Lookup(ctx context.Context, request LookupRequest) (L
 			}
 		} else if teamErr != nil && !errors.Is(teamErr, ErrNotFound) && storage.public == nil {
 			if localFound {
+				localResult.Degraded = true
 				return localResult, nil
 			}
 			return LookupResult{}, remoteFailureMiss(ctx, "lookup Team Cache", teamErr)
@@ -148,7 +204,7 @@ func (storage *CacheChain) Lookup(ctx context.Context, request LookupRequest) (L
 	}
 
 	best := LookupResult{}
-	bestStorage := StorageIndex(nil)
+	bestStorage := CacheReader(nil)
 	bestName := ""
 	found := false
 	if localFound {
@@ -159,6 +215,7 @@ func (storage *CacheChain) Lookup(ctx context.Context, request LookupRequest) (L
 	}
 
 	var publicErr error
+	degraded := teamErr != nil && !errors.Is(teamErr, ErrNotFound)
 	if storage.public != nil {
 		publicResult, err := storage.public.Lookup(ctx, request)
 		if err == nil {
@@ -168,6 +225,7 @@ func (storage *CacheChain) Lookup(ctx context.Context, request LookupRequest) (L
 			}
 		} else if !errors.Is(err, ErrNotFound) {
 			publicErr = err
+			degraded = true
 		}
 	}
 	if !found {
@@ -180,31 +238,53 @@ func (storage *CacheChain) Lookup(ctx context.Context, request LookupRequest) (L
 		return LookupResult{}, ErrNotFound
 	}
 	if bestStorage == storage.local {
+		best.Degraded = degraded
 		return best, nil
 	}
 	warmedEntry, err := storage.warmLocalOnce(ctx, request, best, bestStorage, bestName)
+	if errors.Is(err, errWarmRetry) {
+		return storage.Lookup(ctx, request)
+	}
 	if err != nil {
 		if localFound && best.Source != SourceLocalCache {
+			localResult.Degraded = true
 			return localResult, nil
 		}
 		return LookupResult{}, remoteFailureMiss(ctx, "warm Local Cache from "+bestName, err)
 	}
 	best.Entry = warmedEntry
+	best.Degraded = degraded
 	return best, nil
+}
+
+func publicEntryMatchesLookup(metadata *PublicEntryMetadata, scope Scope, entry Entry) bool {
+	return publicEntryCoordinateMatchesLookup(metadata, scope, entry) &&
+		metadata.Request.SourceCommit == scope.SourceCommit && metadata.Request.RecipeDigest == scope.RecipeDigest &&
+		metadata.Request.Target == scope.Target && metadata.Request.Platform == scope.Platform && metadata.Request.Toolchain == scope.Toolchain &&
+		metadata.Request.Builder == scope.Builder
+}
+
+func publicEntryCoordinateMatchesLookup(metadata *PublicEntryMetadata, scope Scope, entry Entry) bool {
+	if metadata == nil {
+		return false
+	}
+	request := metadata.Request
+	return request.Repository == scope.Repository && request.Compatibility == scope.Compatibility &&
+		request.Ref == entry.Ref && request.Key == entry.Key && request.Version == entry.Version
 }
 
 func remoteFailureMiss(ctx context.Context, operation string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
-	return errors.Join(ErrNotFound, fmt.Errorf("%s: %w", operation, err))
+	return errors.Join(ErrNotFound, errRemoteDegraded, fmt.Errorf("%s: %w", operation, err))
 }
 
 func (storage *CacheChain) warmLocalOnce(
 	ctx context.Context,
 	request LookupRequest,
 	remote LookupResult,
-	remoteStorage StorageIndex,
+	remoteStorage CacheReader,
 	remoteName string,
 ) (Entry, error) {
 	identity := cacheChainIdentity{
@@ -218,7 +298,7 @@ func (storage *CacheChain) warmLocalOnce(
 		case <-ctx.Done():
 			return Entry{}, ctx.Err()
 		case <-running.done:
-			return running.entry, running.err
+			return Entry{}, errWarmRetry
 		}
 	}
 	call := &warmCall{done: make(chan struct{})}
@@ -238,14 +318,35 @@ func (storage *CacheChain) Reserve(ctx context.Context, request ReserveRequest) 
 	if err != nil {
 		return Reservation{}, err
 	}
-	storage.mu.Lock()
-	storage.reservations[reservation.ID] = cloneReserveRequest(request)
-	storage.mu.Unlock()
+	if storage.team != nil && !storage.durableTeamPublication {
+		storage.rememberReservation(reservation.ID, request, time.Now().UTC())
+	}
 	return reservation, nil
 }
 
 func (storage *CacheChain) Upload(ctx context.Context, request UploadRequest) error {
 	return storage.local.Upload(ctx, request)
+}
+
+func (storage *CacheChain) Abort(ctx context.Context, reservationID int64) error {
+	return storage.AbortScoped(ctx, reservationID, nil)
+}
+
+func (storage *CacheChain) AbortScoped(ctx context.Context, reservationID int64, scope *Scope) error {
+	storage.mu.Lock()
+	storage.pruneReservationsLocked(time.Now().UTC())
+	storage.mu.Unlock()
+	aborter, ok := storage.local.(scopedReservationAborter)
+	if !ok {
+		return ErrInvalidUpload
+	}
+	err := aborter.AbortScoped(ctx, reservationID, scope)
+	if err == nil {
+		storage.mu.Lock()
+		delete(storage.reservations, reservationID)
+		storage.mu.Unlock()
+	}
+	return err
 }
 
 func (storage *CacheChain) Commit(ctx context.Context, request CommitRequest) (Entry, error) {
@@ -254,13 +355,42 @@ func (storage *CacheChain) Commit(ctx context.Context, request CommitRequest) (E
 		return Entry{}, err
 	}
 	storage.mu.Lock()
+	storage.pruneReservationsLocked(time.Now().UTC())
 	reservation, found := storage.reservations[request.ReservationID]
 	delete(storage.reservations, request.ReservationID)
 	storage.mu.Unlock()
-	if found {
-		storage.publishTeamBestEffort(ctx, reservation, entry)
+	if found && !storage.durableTeamPublication {
+		storage.publishTeamBestEffort(ctx, reservation.request, entry)
 	}
 	return entry, nil
+}
+
+func (storage *CacheChain) rememberReservation(id int64, request ReserveRequest, now time.Time) {
+	storage.mu.Lock()
+	defer storage.mu.Unlock()
+	storage.pruneReservationsLocked(now)
+	if _, replacing := storage.reservations[id]; !replacing && len(storage.reservations) >= maxTrackedCacheChainReservations {
+		var oldestID int64
+		var oldestExpiry time.Time
+		for candidateID, candidate := range storage.reservations {
+			if oldestExpiry.IsZero() || candidate.expires.Before(oldestExpiry) {
+				oldestID = candidateID
+				oldestExpiry = candidate.expires
+			}
+		}
+		delete(storage.reservations, oldestID)
+	}
+	storage.reservations[id] = cacheChainReservation{
+		request: cloneReserveRequest(request), expires: now.Add(actionsReservationTTL),
+	}
+}
+
+func (storage *CacheChain) pruneReservationsLocked(now time.Time) {
+	for id, reservation := range storage.reservations {
+		if reservation.expires.IsZero() || !now.Before(reservation.expires) {
+			delete(storage.reservations, id)
+		}
+	}
 }
 
 func (storage *CacheChain) Open(ctx context.Context, request OpenRequest) (Archive, error) {
@@ -271,7 +401,7 @@ func (storage *CacheChain) warmLocal(
 	ctx context.Context,
 	request LookupRequest,
 	remote LookupResult,
-	remoteStorage StorageIndex,
+	remoteStorage CacheReader,
 	remoteName string,
 ) (_ Entry, returnErr error) {
 	archive, err := remoteStorage.Open(ctx, OpenRequest{Scope: request.Scope, ID: remote.Entry.ID})
@@ -307,7 +437,9 @@ func (storage *CacheChain) warmLocal(
 			return
 		}
 		if aborter, ok := storage.local.(reservationAborter); ok {
-			returnErr = errors.Join(returnErr, aborter.Abort(ctx, reservation.ID))
+			cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			returnErr = errors.Join(returnErr, aborter.Abort(cleanupContext, reservation.ID))
 		}
 	}()
 
@@ -326,7 +458,8 @@ func (storage *CacheChain) warmLocal(
 	}
 	entry, err := storage.local.Commit(ctx, CommitRequest{
 		ReservationID: reservation.ID, Scope: &warmScope, Size: size, Origin: remote.Source,
-		Public: clonePublicEntryMetadata(remote.Entry.Public),
+		ProducerDuration: cloneDuration(remote.Entry.ProducerDuration),
+		Public:           clonePublicEntryMetadata(remote.Entry.Public),
 	})
 	if err != nil {
 		return Entry{}, err
@@ -375,6 +508,12 @@ func (storage *CacheChain) existingLocalEntry(ctx context.Context, scope Scope, 
 	if result.Match != MatchExact || result.Entry.Key != remote.Key {
 		return Entry{}, ErrAlreadyExists
 	}
+	if result.Entry.Public != nil && !publicEntryMatchesLookup(result.Entry.Public, scope, result.Entry) {
+		return Entry{}, ErrNotFound
+	}
+	if remote.Public == nil && result.Entry.Public != nil {
+		return Entry{}, ErrNotFound
+	}
 	return result.Entry, nil
 }
 
@@ -397,12 +536,15 @@ func (storage *CacheChain) publishTeamBestEffort(ctx context.Context, reservatio
 	if _, err := uploadArchive(ctx, storage.team, teamReservation.ID, &reservation.Scope, archive.Body, size); err != nil {
 		return
 	}
-	_, _ = storage.team.Commit(ctx, CommitRequest{ReservationID: teamReservation.ID, Scope: &reservation.Scope, Size: size})
+	_, _ = storage.team.Commit(ctx, CommitRequest{
+		ReservationID: teamReservation.ID, Scope: &reservation.Scope, Size: size,
+		ProducerDuration: cloneDuration(entry.ProducerDuration),
+	})
 }
 
 func uploadArchive(
 	ctx context.Context,
-	destination StorageIndex,
+	destination CacheWriter,
 	reservationID int64,
 	scope *Scope,
 	source io.Reader,

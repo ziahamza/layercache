@@ -42,9 +42,11 @@ func TestPublicClientRejectsArtifactRedirectToAnotherOrigin(t *testing.T) {
 		Repository:   "https://github.com/acme/widget",
 		Commit:       "0123456789abcdef0123456789abcdef01234567",
 		RecipeDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Target:       "build",
 		Platform:     "linux/amd64", Toolchain: "turbo@2.10.9",
-		Builder: "builder@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-		Digest:  hex.EncodeToString(bodyDigest[:]), Size: 25, DurationMS: 100,
+		Builder:            "builder@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		BuilderImageDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Digest:             hex.EncodeToString(bodyDigest[:]), Size: 25, DurationMS: 100,
 		BuildID: "public-build-1", IssuedAt: time.Now().UTC().Add(-time.Minute),
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}

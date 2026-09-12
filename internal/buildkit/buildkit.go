@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const defaultMaxTeamImports = 4
@@ -27,15 +28,27 @@ const (
 )
 
 type Config struct {
-	DockerCommand  string
-	BuilderName    string
-	TeamRepository string
-	MaxTeamImports int
+	DockerCommand        string
+	BuilderName          string
+	TeamRepository       string
+	MaxTeamImports       int
+	PromotionLockDir     string
+	PromotionCoordinator PromotionCoordinator
+	LocalBudget          *LocalCacheBudget
+}
+
+type LocalCacheBudget struct {
+	StateDir         string
+	MaxBytes         int64
+	BuildkitMaxBytes int64
+	UsedBytes        int64
+	MinFreeBytes     int64
 }
 
 type PublicCache struct {
-	Repository string
-	Digest     string
+	Repository     string
+	Digest         string
+	PublicIdentity string
 }
 
 type BuildRequest struct {
@@ -43,6 +56,7 @@ type BuildRequest struct {
 	TargetPlatform string
 	TeamImportTags []string
 	TeamExportID   string
+	TeamPromoteTag string
 	PublicImports  []PublicCache
 	Output         Output
 	ExtraArgs      []string
@@ -54,13 +68,26 @@ type Command struct {
 }
 
 type Plan struct {
-	Command Command
+	Command      Command
+	Promotion    *Command     `json:",omitempty"`
+	CacheScopes  []CacheScope `json:",omitempty"`
+	TeamExportID string       `json:",omitempty"`
+}
+
+type CacheScope struct {
+	Tier           string `json:"tier"`
+	Direction      string `json:"direction"`
+	Reference      string `json:"reference"`
+	PublicIdentity string `json:"publicIdentity,omitempty"`
 }
 
 type ExecutionResult struct {
 	Plan            Plan            `json:"plan"`
 	Metrics         ProgressMetrics `json:"metrics"`
 	ProgressWarning string          `json:"progressWarning,omitempty"`
+	CacheWarnings   []string        `json:"cacheWarnings,omitempty"`
+	BuildStartedAt  time.Time       `json:"-"`
+	BuildFinishedAt time.Time       `json:"-"`
 }
 
 type Adapter struct {
@@ -92,6 +119,11 @@ func NewWithRunner(config Config, runner CommandRunner) (*Adapter, error) {
 	if config.MaxTeamImports < 0 {
 		return nil, errors.New("maximum Team Cache imports cannot be negative")
 	}
+	if config.LocalBudget != nil {
+		if err := validateLocalCacheBudget(*config.LocalBudget); err != nil {
+			return nil, err
+		}
+	}
 	config.TeamRepository = strings.TrimSuffix(config.TeamRepository, "/")
 	if config.TeamRepository != "" {
 		if err := validateCacheRepository("Team Cache", config.TeamRepository); err != nil {
@@ -104,28 +136,45 @@ func NewWithRunner(config Config, runner CommandRunner) (*Adapter, error) {
 func (a *Adapter) EnsureBuilder(ctx context.Context, stdout, stderr io.Writer) error {
 	stdout = writerOrDiscard(stdout)
 	stderr = writerOrDiscard(stderr)
+	warning, err := a.ensureBuilder(ctx, stdout, stderr)
+	if warning != "" {
+		_, _ = fmt.Fprintln(stderr, "Layer Cache BuildKit:", warning)
+	}
+	return err
+}
+
+func (a *Adapter) ensureBuilder(ctx context.Context, stdout, stderr io.Writer) (string, error) {
+	buildkitdConfig, err := a.writeBuildkitdConfig()
+	if err != nil {
+		return "", err
+	}
 	list := Command{
 		Path: a.config.DockerCommand,
 		Args: []string{"buildx", "ls", "--format", "{{json .}}"},
 	}
 	var builders bytes.Buffer
 	if err := a.runner.Run(ctx, list, &builders, io.Discard); err != nil {
-		return fmt.Errorf("list BuildKit builders: %w", err)
+		return "", fmt.Errorf("list BuildKit builders: %w", err)
 	}
 	driver, found, err := findBuilderDriver(&builders, a.config.BuilderName)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !found {
+		createArgs := []string{"buildx", "create", "--name", a.config.BuilderName, "--driver", "docker-container"}
+		if buildkitdConfig != "" {
+			createArgs = append(createArgs, "--buildkitd-config", buildkitdConfig)
+		}
+		createArgs = append(createArgs, "--use")
 		create := Command{
 			Path: a.config.DockerCommand,
-			Args: []string{"buildx", "create", "--name", a.config.BuilderName, "--driver", "docker-container", "--use"},
+			Args: createArgs,
 		}
 		if err := a.runner.Run(ctx, create, stdout, stderr); err != nil {
-			return fmt.Errorf("create BuildKit builder %q: %w", a.config.BuilderName, err)
+			return "", fmt.Errorf("create BuildKit builder %q: %w", a.config.BuilderName, err)
 		}
 	} else if driver != "docker-container" {
-		return fmt.Errorf("BuildKit builder %q uses driver %q, want %q", a.config.BuilderName, driver, "docker-container")
+		return "", fmt.Errorf("BuildKit builder %q uses driver %q, want %q", a.config.BuilderName, driver, "docker-container")
 	}
 
 	bootstrap := Command{
@@ -133,9 +182,15 @@ func (a *Adapter) EnsureBuilder(ctx context.Context, stdout, stderr io.Writer) e
 		Args: []string{"buildx", "inspect", a.config.BuilderName, "--bootstrap"},
 	}
 	if err := a.runner.Run(ctx, bootstrap, stdout, stderr); err != nil {
-		return fmt.Errorf("bootstrap BuildKit builder %q: %w", a.config.BuilderName, err)
+		return "", fmt.Errorf("bootstrap BuildKit builder %q: %w", a.config.BuilderName, err)
 	}
-	return nil
+	if a.config.LocalBudget == nil {
+		return "", nil
+	}
+	if err := a.pruneToLocalBudget(ctx, stderr); err != nil {
+		return fmt.Sprintf("native cache GC did not complete: %v", err), nil
+	}
+	return "", nil
 }
 
 func findBuilderDriver(reader io.Reader, name string) (string, bool, error) {
@@ -170,21 +225,50 @@ func (a *Adapter) Execute(ctx context.Context, request BuildRequest, stdout, std
 	}
 	stdout = writerOrDiscard(stdout)
 	stderr = writerOrDiscard(stderr)
-	if err := a.EnsureBuilder(ctx, stdout, stderr); err != nil {
-		return ExecutionResult{Plan: plan}, err
+	result := ExecutionResult{Plan: plan}
+	gcWarning, err := a.ensureBuilder(ctx, stdout, stderr)
+	if err != nil {
+		return result, err
+	}
+	if gcWarning != "" {
+		result.CacheWarnings = append(result.CacheWarnings, gcWarning)
+		_, _ = fmt.Fprintln(stderr, "Layer Cache BuildKit:", gcWarning)
 	}
 
-	var progress bytes.Buffer
-	runErr := a.runner.Run(ctx, plan.Command, stdout, io.MultiWriter(stderr, &progress))
-	result := ExecutionResult{Plan: plan}
-	metrics, progressErr := ParseProgress(&progress)
+	progress := newProgressStreamWithScopes(stderr, plan.CacheScopes)
+	started := time.Now()
+	result.BuildStartedAt = started.UTC()
+	runErr := a.runner.Run(ctx, plan.Command, stdout, progress)
+	finished := time.Now()
+	result.BuildFinishedAt = finished.UTC()
+	buildDuration := finished.Sub(started)
+	metrics, progressErr := progress.finish()
+	metrics.BuildDurationMS = buildDuration.Milliseconds()
+	metrics.RequestedCacheScopes = append([]CacheScope(nil), plan.CacheScopes...)
+	metrics.CacheSource = cacheSource(metrics, plan.CacheScopes)
+	result.Metrics = metrics
 	if progressErr != nil {
 		result.ProgressWarning = progressErr.Error()
-	} else {
-		result.Metrics = metrics
+	}
+	if a.config.LocalBudget != nil {
+		if err := a.pruneToLocalBudget(ctx, stderr); err != nil {
+			warning := fmt.Sprintf("native cache post-build GC did not complete: %v", err)
+			result.CacheWarnings = append(result.CacheWarnings, warning)
+			_, _ = fmt.Fprintln(stderr, "Layer Cache BuildKit:", warning)
+		}
 	}
 	if runErr != nil {
 		return result, fmt.Errorf("run BuildKit build: %w", runErr)
+	}
+	if plan.Promotion != nil {
+		result.Metrics.TeamPromotionAttempted = true
+		if err := a.promote(ctx, *plan.Promotion, plan.promotionReference(), stderr); err != nil {
+			warning := fmt.Sprintf("Team Cache promotion failed after the image build succeeded: %v", err)
+			result.CacheWarnings = append(result.CacheWarnings, warning)
+			_, _ = fmt.Fprintln(stderr, "Layer Cache BuildKit:", warning)
+		} else {
+			result.Metrics.TeamPromotionSucceeded = true
+		}
 	}
 	return result, nil
 }
@@ -205,7 +289,7 @@ func (a *Adapter) Plan(request BuildRequest) (Plan, error) {
 	if len(request.TeamImportTags) > a.config.MaxTeamImports {
 		return Plan{}, fmt.Errorf("use at most %d Team Cache imports", a.config.MaxTeamImports)
 	}
-	if (len(request.TeamImportTags) > 0 || request.TeamExportID != "") && a.config.TeamRepository == "" {
+	if (len(request.TeamImportTags) > 0 || request.TeamExportID != "" || request.TeamPromoteTag != "") && a.config.TeamRepository == "" {
 		return Plan{}, errors.New("Team Cache repository is required for Team Cache imports or publication")
 	}
 	for _, tag := range request.TeamImportTags {
@@ -213,8 +297,16 @@ func (a *Adapter) Plan(request BuildRequest) (Plan, error) {
 			return Plan{}, fmt.Errorf("Team Cache import %q must be a safe OCI tag", tag)
 		}
 	}
-	if request.TeamExportID != "" && !ociTagPattern.MatchString(request.TeamExportID) {
-		return Plan{}, fmt.Errorf("Team Cache export ID %q must be a safe OCI tag", request.TeamExportID)
+	if request.TeamExportID != "" {
+		if err := validateTeamExportID(request.TeamExportID); err != nil {
+			return Plan{}, err
+		}
+	}
+	if request.TeamPromoteTag != "" && !ociTagPattern.MatchString(request.TeamPromoteTag) {
+		return Plan{}, fmt.Errorf("Team Cache promotion %q must be a safe OCI tag", request.TeamPromoteTag)
+	}
+	if request.TeamPromoteTag != "" && request.TeamExportID == "" {
+		return Plan{}, errors.New("Team Cache promotion requires an immutable Team Cache export")
 	}
 	if err := validateExtraArgs(request.ExtraArgs); err != nil {
 		return Plan{}, err
@@ -228,19 +320,36 @@ func (a *Adapter) Plan(request BuildRequest) (Plan, error) {
 	}
 	platform := strings.ReplaceAll(request.TargetPlatform, "/", "-")
 	teamRepository := a.config.TeamRepository + "/" + platform
+	plan := Plan{TeamExportID: request.TeamExportID}
 	for _, tag := range request.TeamImportTags {
-		args = append(args, "--cache-from", "type=registry,ref="+teamRepository+":"+tag)
+		reference := teamRepository + ":" + tag
+		args = append(args, "--cache-from", "type=registry,ref="+reference)
+		plan.CacheScopes = append(plan.CacheScopes, CacheScope{Tier: "Team Cache", Direction: "import", Reference: reference})
 	}
 	for _, public := range request.PublicImports {
 		if err := validatePublicCache(public); err != nil {
 			return Plan{}, err
 		}
 		repository := strings.TrimSuffix(public.Repository, "/") + "/" + platform
-		args = append(args, "--cache-from", "type=registry,ref="+repository+"@"+public.Digest)
+		reference := repository + "@" + public.Digest
+		args = append(args, "--cache-from", "type=registry,ref="+reference)
+		plan.CacheScopes = append(plan.CacheScopes, CacheScope{
+			Tier: "Public Cache", Direction: "import", Reference: reference, PublicIdentity: public.PublicIdentity,
+		})
 	}
 	if request.TeamExportID != "" {
-		cacheTo := "type=registry,ref=" + teamRepository + ":build-" + request.TeamExportID + ",mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true"
+		reference := teamRepository + ":build-" + request.TeamExportID
+		cacheTo := "type=registry,ref=" + reference + ",mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true"
 		args = append(args, "--cache-to", cacheTo)
+		plan.CacheScopes = append(plan.CacheScopes, CacheScope{Tier: "Team Cache", Direction: "export", Reference: reference})
+		if request.TeamPromoteTag != "" {
+			promoted := teamRepository + ":" + request.TeamPromoteTag
+			plan.Promotion = &Command{Path: a.config.DockerCommand, Args: []string{
+				"buildx", "imagetools", "create", "--builder", a.config.BuilderName,
+				"--prefer-index=false", "--progress=plain", "--tag", promoted, reference,
+			}}
+			plan.CacheScopes = append(plan.CacheScopes, CacheScope{Tier: "Team Cache", Direction: "promote", Reference: promoted})
+		}
 	}
 	if request.Output == OutputPush {
 		args = append(args, "--push")
@@ -250,7 +359,29 @@ func (a *Adapter) Plan(request BuildRequest) (Plan, error) {
 	args = append(args, request.ExtraArgs...)
 	args = append(args, request.ContextPath)
 
-	return Plan{Command: Command{Path: a.config.DockerCommand, Args: args}}, nil
+	plan.Command = Command{Path: a.config.DockerCommand, Args: args}
+	return plan, nil
+}
+
+func (plan Plan) promotionReference() string {
+	for _, scope := range plan.CacheScopes {
+		if scope.Direction == "promote" {
+			return scope.Reference
+		}
+	}
+	return ""
+}
+
+func cacheSource(metrics ProgressMetrics, scopes []CacheScope) string {
+	if metrics.CachedVertices == 0 {
+		return "miss"
+	}
+	for _, scope := range scopes {
+		if scope.Direction == "import" {
+			return "unattributed"
+		}
+	}
+	return "Local Cache"
 }
 
 func validatePublicCache(public PublicCache) error {
@@ -266,6 +397,12 @@ func validatePublicCache(public PublicCache) error {
 	}
 	if _, err := hex.DecodeString(encoded); err != nil {
 		return fmt.Errorf("Public Cache %q must use a complete SHA-256 digest: %w", public.Repository, err)
+	}
+	if len(public.PublicIdentity) != 64 || public.PublicIdentity != strings.ToLower(public.PublicIdentity) {
+		return fmt.Errorf("Public Cache %q must include its complete signed publication identity", public.Repository)
+	}
+	if _, err := hex.DecodeString(public.PublicIdentity); err != nil {
+		return fmt.Errorf("Public Cache %q must include its complete signed publication identity: %w", public.Repository, err)
 	}
 	return nil
 }

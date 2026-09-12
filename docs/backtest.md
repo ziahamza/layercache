@@ -6,11 +6,16 @@
 layercache backtest \
   --input history.json \
   --retention 168h \
+  --max-bytes 21474836480 \
   --source teamCache \
   --json
 ```
 
 `--source` accepts `localCache`, `teamCache`, `publicCache`, or `unattributed`. It labels simulated hits; it does not change matching. A hit requires the exact `artifactId` and `compatibilityId` pair.
+
+`--max-bytes` replays the byte quota. Zero leaves the simulated quota unbounded. `--eviction-policy lru` is the default; `--eviction-policy impact` compares the opt-in producer-cost policy at the same byte cap. Run the same history with each policy and compare hit rate and signed estimated savings, including negative values. JSON records `evictionPolicy`, `impactEvictions`, and `lruFallbackEvictions`. See [retention](retention.md) for the scoring rule and limitations.
+
+The simulated retention deadline is renewed on a hit. It is a backtest assumption, not a configurable live-cache expiry guarantee. The JSON result also reports `totalWork`, `knownFingerprints`, and `fingerprintCoverage` so incomplete historical identity is visible.
 
 The input is strict JSON with schema version `1`:
 
@@ -51,7 +56,7 @@ The input is strict JSON with schema version `1`:
 }
 ```
 
-All timestamps use RFC3339 and all durations in the file use milliseconds. Omit `executionDurationMs` when the producer duration is unknown. The resulting savings estimate then reports incomplete coverage instead of inventing a value. Negative savings are retained when cache overhead exceeds the known producer duration.
+All timestamps use RFC3339 and all durations in the file use milliseconds. Omit `artifactId` or `compatibilityId` when historical fingerprint evidence is unavailable. That work is reported as `unknown`, not as a miss. Omit `executionDurationMs` when producer timing is unavailable. The resulting savings estimate then reports incomplete coverage instead of inventing a value. Negative savings are retained when cache overhead exceeds the known producer duration.
 
 For persisted measurements from a running daemon, query a half-open period by run start (`from <= startedAt < to`):
 

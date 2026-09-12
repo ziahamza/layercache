@@ -5,6 +5,7 @@
 !action/cache/dist/
 !action/cache/dist/**
 /coverage/
+.turbo/
 *.db
 *.db-shm
 *.db-wal

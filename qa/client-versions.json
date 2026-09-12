@@ -1,0 +1,26 @@
+{
+  "turbo": {
+    "minimum": "2.9.14",
+    "current": "2.10.12"
+  },
+  "actionsCache": {
+    "minimum": "5.0.0",
+    "current": "6.2.0"
+  },
+  "buildx": {
+    "minimum": {
+      "version": "0.21.3",
+      "sha256": {
+        "linux-amd64": "47f456339ca8926efcb7266f700a3bbb8a472585d977e7e2f6f22242ea6531c6",
+        "linux-arm64": "90157681a0a033b285e80d3350741452d7647994fb371c9ee3a423f2ca4f22cc"
+      }
+    },
+    "current": {
+      "version": "0.36.1",
+      "sha256": {
+        "linux-amd64": "48af8a397ebd60178778bf63611dbcebe5f5e7a9be90eb9147b24b9587455778",
+        "linux-arm64": "5d0cafd9d16afe1a0f0d9529885344ace2cc99efdd531b6c783c5455a6001569"
+      }
+    }
+  }
+}

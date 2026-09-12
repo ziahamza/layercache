@@ -37,20 +37,26 @@ func TestTurboGatewayPersistsOpaqueArtifactOutsideWorkspace(t *testing.T) {
 		"--json",
 	)
 
-	var connection turboConnection
-	output := runLayerCache(t, "integration", "turbo", "--config", configPath, "--json")
-	if err := json.Unmarshal(output, &connection); err != nil {
+	binary := buildLayerCache(t)
+	var preview struct {
+		APIURL            string `json:"apiUrl"`
+		Token             string `json:"token"`
+		Preview           bool   `json:"preview"`
+		CredentialStorage string `json:"credentialStorage"`
+	}
+	output := runBinary(t, binary, "integration", "turbo", "--config", configPath, "--json")
+	if err := json.Unmarshal(output, &preview); err != nil {
 		t.Fatalf("decode Turbo connection: %v\n%s", err, output)
 	}
-	if connection.APIURL != "http://"+address {
-		t.Fatalf("apiUrl = %q, want %q", connection.APIURL, "http://"+address)
+	if preview.APIURL != "http://"+address {
+		t.Fatalf("apiUrl = %q, want %q", preview.APIURL, "http://"+address)
 	}
-	if connection.Token == "" || connection.Team == "" {
-		t.Fatalf("incomplete Turbo connection: %+v", connection)
+	if !preview.Preview || preview.Token != "" || preview.CredentialStorage != "none" {
+		t.Fatalf("Turbo preview exposed or persisted a credential: %+v", preview)
 	}
 
-	binary := buildLayerCache(t)
 	server := startLayerCache(t, binary, configPath, address)
+	connection := captureTurboConnection(t, binary, configPath)
 
 	artifactURL := connection.APIURL + "/v8/artifacts/6f64a64d"
 	request, err := http.NewRequest(http.MethodHead, artifactURL, nil)
@@ -125,6 +131,20 @@ type runningLayerCache struct {
 
 func buildLayerCache(t *testing.T) string {
 	t.Helper()
+	if candidate := os.Getenv("LAYERCACHE_ACCEPTANCE_BINARY"); candidate != "" {
+		candidate, err := filepath.Abs(candidate)
+		if err != nil {
+			t.Fatalf("resolve LAYERCACHE_ACCEPTANCE_BINARY: %v", err)
+		}
+		info, err := os.Stat(candidate)
+		if err != nil {
+			t.Fatalf("inspect LAYERCACHE_ACCEPTANCE_BINARY %s: %v", candidate, err)
+		}
+		if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("LAYERCACHE_ACCEPTANCE_BINARY %s is not an executable file", candidate)
+		}
+		return candidate
+	}
 	name := "layercache"
 	if runtime.GOOS == "windows" {
 		name += ".exe"

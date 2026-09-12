@@ -3,6 +3,7 @@ package actionscache_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/layercache/layercache/internal/actionscache"
 	"github.com/layercache/layercache/internal/artifact"
+	"github.com/layercache/layercache/internal/measurement"
 )
 
 func TestCacheChainPrefersStrongerTeamMatchAndWarmsLocalBeforeServing(t *testing.T) {
@@ -209,6 +211,9 @@ func TestCacheChainReturnsLocalCandidateWhenTeamLookupFails(t *testing.T) {
 	if result.Entry.Key != "restore-local" || result.Source != actionscache.SourceLocalCache {
 		t.Fatalf("result = %#v, want Local Cache fallback", result)
 	}
+	if !result.Degraded {
+		t.Fatalf("result = %#v, want degraded Local Cache fallback", result)
+	}
 }
 
 func TestActionsLookupTreatsTeamCacheOutageAsMiss(t *testing.T) {
@@ -222,9 +227,14 @@ func TestActionsLookupTreatsTeamCacheOutageAsMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var outcomes []measurement.FinalOutcome
 	handler, err := actionscache.NewHandler(actionscache.Config{
 		Repository: scope.Repository, Ref: scope.Ref, DefaultRef: scope.DefaultRef,
 		Compatibility: scope.Compatibility,
+		RecordOutcome: func(outcome measurement.FinalOutcome) error {
+			outcomes = append(outcomes, outcome)
+			return nil
+		},
 	}, chain)
 	if err != nil {
 		t.Fatal(err)
@@ -236,6 +246,55 @@ func TestActionsLookupTreatsTeamCacheOutageAsMiss(t *testing.T) {
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("Team Cache outage status = %d, want cache miss %d; body = %q", response.Code, http.StatusNoContent, response.Body.String())
 	}
+	if len(outcomes) != 1 || !outcomes[0].Degraded || outcomes[0].Result != measurement.ResultMiss {
+		t.Fatalf("Team Cache outage outcomes = %#v, want one degraded miss", outcomes)
+	}
+}
+
+func TestActionsLookupRecordsRemoteDegradationOnLocalFallback(t *testing.T) {
+	t.Parallel()
+
+	scope := actionscache.Scope{
+		Repository: "acme/widgets", Ref: "refs/heads/main",
+		DefaultRef: "refs/heads/main", Compatibility: "linux-x64",
+	}
+	local := actionscache.NewMemoryStorage()
+	putArchive(t, local, scope, "restore-local", "v1", []byte("local"))
+	chain, err := actionscache.NewCacheChain(local, alwaysFailStorage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outcomes []measurement.FinalOutcome
+	handler, err := actionscache.NewHandler(actionscache.Config{
+		Repository: scope.Repository, Ref: scope.Ref, DefaultRef: scope.DefaultRef,
+		Compatibility: scope.Compatibility,
+		RecordOutcome: func(outcome measurement.FinalOutcome) error {
+			outcomes = append(outcomes, outcome)
+			return nil
+		},
+	}, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lookupRequest := httptest.NewRequest(http.MethodGet, "/_apis/artifactcache/cache?keys=restore-&version=v1", nil)
+	lookupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(lookupResponse, lookupRequest)
+	var lookup struct {
+		ArchiveLocation string `json:"archiveLocation"`
+	}
+	if lookupResponse.Code != http.StatusOK || json.Unmarshal(lookupResponse.Body.Bytes(), &lookup) != nil {
+		t.Fatalf("Local fallback lookup = %d %s", lookupResponse.Code, lookupResponse.Body.String())
+	}
+	downloadResponse := httptest.NewRecorder()
+	handler.ServeHTTP(downloadResponse, httptest.NewRequest(http.MethodGet, lookup.ArchiveLocation, nil))
+	if downloadResponse.Code != http.StatusOK || downloadResponse.Body.String() != "local" {
+		t.Fatalf("Local fallback download = %d %q", downloadResponse.Code, downloadResponse.Body.String())
+	}
+	if len(outcomes) != 1 || !outcomes[0].Degraded || outcomes[0].Result != measurement.ResultHit ||
+		outcomes[0].Source != measurement.SourceLocalCache {
+		t.Fatalf("Local fallback outcomes = %#v, want one degraded Local Cache hit", outcomes)
+	}
 }
 
 func TestActionsLookupTreatsPublicCacheOutageAsMiss(t *testing.T) {
@@ -246,7 +305,7 @@ func TestActionsLookupTreatsPublicCacheOutageAsMiss(t *testing.T) {
 		DefaultRef: "refs/heads/main", Compatibility: "linux-x64",
 	}
 	chain, err := actionscache.NewCacheChainWithPublic(
-		actionscache.NewMemoryStorage(), nil, alwaysFailPublicStorage{},
+		actionscache.NewMemoryStorage(), nil, alwaysFailPublicCache{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -528,9 +587,9 @@ func (alwaysFailStorage) Open(context.Context, actionscache.OpenRequest) (action
 	return actionscache.Archive{}, errors.New("unavailable")
 }
 
-type alwaysFailPublicStorage struct{ alwaysFailStorage }
+type alwaysFailPublicCache struct{ alwaysFailStorage }
 
-func (alwaysFailPublicStorage) RevalidateEntry(
+func (alwaysFailPublicCache) RevalidateEntry(
 	context.Context,
 	*actionscache.PublicEntryMetadata,
 ) (*actionscache.PublicEntryMetadata, error) {

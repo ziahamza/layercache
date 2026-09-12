@@ -1,0 +1,177 @@
+[
+  {
+    "preflight": {
+      "workerId": "actions-kvm-e2e",
+      "platform": "linux/amd64",
+      "kernelSha256": "sha256:0066409132868538bc0c9076f60131025775d5bbd8617df074d059f91b584918",
+      "rootfsSha256": "sha256:1b9af0fad8984b50a181a94277e8a4605b25812c8327f59fd2e10afe9c76da2f",
+      "contractSha256": "sha256:766ef386869d5a584cdcc25cf786b0cac3e89e350178f75049953a0a5a6c8d9c",
+      "builderImageDigest": "sha256:0896619c588237c40cb61c7bedb7b2dfedbb120a26ce9de29660663315c2b6f3",
+      "protocol": "layercache.public-build/v1",
+      "sandboxUid": 64000,
+      "sandboxGid": 994,
+      "network": "none",
+      "sourceTransport": "immutable ext4 block device, read-only",
+      "outputTransport": "bounded virtio-serial stream to trusted host collector",
+      "dependencyMode": "offline-only; dependencies must be vendored in source or pinned in the immutable image",
+      "maxScratchBytes": 2147483648
+    },
+    "producerDurationMilliseconds": 8276,
+    "collected": {
+      "NativeKey": "sha256:7b9ec1669b73e6d45da5d7321e5b3b88ab5b13d3eb2b88d1e6fd2ffc9f24ff56",
+      "MediaType": "application/vnd.layercache.actions-cache",
+      "ResultFormat": "native-blob",
+      "ResultMediaType": "application/vnd.layercache.actions-cache",
+      "Digest": "sha256:8da396eb2322a3b0a1ec0c2d9909ece843e3377b88af250448f9007b466e8dfe",
+      "SizeBytes": 158
+    },
+    "archiveMembers": {
+      "cache/artifact.txt": "public-cache-payload-from-real-kvm"
+    },
+    "outputDigestVerified": true,
+    "nativeKeyVerified": true,
+    "realTurboRestoreVerified": null,
+    "runOutputVerified": null,
+    "layers": null
+  },
+  {
+    "preflight": {
+      "workerId": "actions-kvm-e2e",
+      "platform": "linux/amd64",
+      "kernelSha256": "sha256:0066409132868538bc0c9076f60131025775d5bbd8617df074d059f91b584918",
+      "rootfsSha256": "sha256:1b9af0fad8984b50a181a94277e8a4605b25812c8327f59fd2e10afe9c76da2f",
+      "contractSha256": "sha256:766ef386869d5a584cdcc25cf786b0cac3e89e350178f75049953a0a5a6c8d9c",
+      "builderImageDigest": "sha256:0896619c588237c40cb61c7bedb7b2dfedbb120a26ce9de29660663315c2b6f3",
+      "protocol": "layercache.public-build/v1",
+      "sandboxUid": 64000,
+      "sandboxGid": 994,
+      "network": "none",
+      "sourceTransport": "immutable ext4 block device, read-only",
+      "outputTransport": "bounded virtio-serial stream to trusted host collector",
+      "dependencyMode": "offline-only; dependencies must be vendored in source or pinned in the immutable image",
+      "maxScratchBytes": 2147483648
+    },
+    "producerDurationMilliseconds": 8368,
+    "collected": {
+      "NativeKey": "sha256:7b9ec1669b73e6d45da5d7321e5b3b88ab5b13d3eb2b88d1e6fd2ffc9f24ff56",
+      "MediaType": "application/vnd.layercache.actions-cache",
+      "ResultFormat": "native-blob",
+      "ResultMediaType": "application/vnd.layercache.actions-cache",
+      "Digest": "sha256:8da396eb2322a3b0a1ec0c2d9909ece843e3377b88af250448f9007b466e8dfe",
+      "SizeBytes": 158
+    },
+    "archiveMembers": {
+      "cache/artifact.txt": "public-cache-payload-from-real-kvm"
+    },
+    "outputDigestVerified": true,
+    "nativeKeyVerified": true,
+    "realTurboRestoreVerified": null,
+    "runOutputVerified": null,
+    "layers": null
+  },
+  {
+    "preflight": {
+      "workerId": "turbo-kvm-e2e",
+      "platform": "linux/amd64",
+      "kernelSha256": "sha256:0066409132868538bc0c9076f60131025775d5bbd8617df074d059f91b584918",
+      "rootfsSha256": "sha256:1bc8828f9aea465804619ae070ea907bd68e59875f380dd0c8dc3333eba5b85d",
+      "contractSha256": "sha256:1b0165aa5eeb1ca65450251ecc3e2fe88a63cbcf8864767adc5b51de80ab9914",
+      "builderImageDigest": "sha256:24a5d9d712b5aa7e0edf292fa6a7b18b16557749e3c3f98af6818e34f024612d",
+      "protocol": "layercache.public-build/v1",
+      "sandboxUid": 64000,
+      "sandboxGid": 994,
+      "network": "none",
+      "sourceTransport": "immutable ext4 block device, read-only",
+      "outputTransport": "bounded virtio-serial stream to trusted host collector",
+      "dependencyMode": "offline-only; dependencies must be vendored in source or pinned in the immutable image",
+      "maxScratchBytes": 4294967296
+    },
+    "producerDurationMilliseconds": 9950,
+    "collected": {
+      "NativeKey": "25377100f2716363",
+      "MediaType": "application/vnd.layercache.turbo",
+      "ResultFormat": "native-blob",
+      "ResultMediaType": "application/vnd.layercache.turbo",
+      "Digest": "sha256:a2c8e238d92f915f5ca6d70e19b851afa65cf1e579e8494555e8f61cf731ac22",
+      "SizeBytes": 256
+    },
+    "archiveMembers": {
+      "packages/app/.turbo/turbo-build.log": "\n> @qa/app@1.0.0 build\n> node build.js\n\ncreated deterministic KVM fixture output\n",
+      "packages/app/dist/output.txt": "layercache-real-turbo-2.10.12-kvm\n"
+    },
+    "outputDigestVerified": true,
+    "nativeKeyVerified": true,
+    "realTurboRestoreVerified": true,
+    "runOutputVerified": null,
+    "layers": null
+  },
+  {
+    "preflight": {
+      "workerId": "turbo-kvm-e2e",
+      "platform": "linux/amd64",
+      "kernelSha256": "sha256:0066409132868538bc0c9076f60131025775d5bbd8617df074d059f91b584918",
+      "rootfsSha256": "sha256:1bc8828f9aea465804619ae070ea907bd68e59875f380dd0c8dc3333eba5b85d",
+      "contractSha256": "sha256:1b0165aa5eeb1ca65450251ecc3e2fe88a63cbcf8864767adc5b51de80ab9914",
+      "builderImageDigest": "sha256:24a5d9d712b5aa7e0edf292fa6a7b18b16557749e3c3f98af6818e34f024612d",
+      "protocol": "layercache.public-build/v1",
+      "sandboxUid": 64000,
+      "sandboxGid": 994,
+      "network": "none",
+      "sourceTransport": "immutable ext4 block device, read-only",
+      "outputTransport": "bounded virtio-serial stream to trusted host collector",
+      "dependencyMode": "offline-only; dependencies must be vendored in source or pinned in the immutable image",
+      "maxScratchBytes": 4294967296
+    },
+    "producerDurationMilliseconds": 10286,
+    "collected": {
+      "NativeKey": "25377100f2716363",
+      "MediaType": "application/vnd.layercache.turbo",
+      "ResultFormat": "native-blob",
+      "ResultMediaType": "application/vnd.layercache.turbo",
+      "Digest": "sha256:a2c8e238d92f915f5ca6d70e19b851afa65cf1e579e8494555e8f61cf731ac22",
+      "SizeBytes": 256
+    },
+    "archiveMembers": {
+      "packages/app/.turbo/turbo-build.log": "\n> @qa/app@1.0.0 build\n> node build.js\n\ncreated deterministic KVM fixture output\n",
+      "packages/app/dist/output.txt": "layercache-real-turbo-2.10.12-kvm\n"
+    },
+    "outputDigestVerified": true,
+    "nativeKeyVerified": true,
+    "realTurboRestoreVerified": true,
+    "runOutputVerified": null,
+    "layers": null
+  },
+  {
+    "preflight": {
+      "workerId": "buildkit-kvm-e2e",
+      "platform": "linux/amd64",
+      "kernelSha256": "sha256:0066409132868538bc0c9076f60131025775d5bbd8617df074d059f91b584918",
+      "rootfsSha256": "sha256:56ba027e9feee136cdea37be9d71361f84eb036b43af2a5d53f33e94de6b4f88",
+      "contractSha256": "sha256:67e8e37f16e28d61983e95f067796ed54ec604ba57cff4f820c3fe6b4a4280f9",
+      "builderImageDigest": "sha256:3948df60f3334eac53435cf3e456d2bbd511494d0bc215c9f7921e5a787f78ec",
+      "protocol": "layercache.public-build/v1",
+      "sandboxUid": 64000,
+      "sandboxGid": 994,
+      "network": "none",
+      "sourceTransport": "immutable ext4 block device, read-only",
+      "outputTransport": "bounded virtio-serial stream to trusted host collector",
+      "dependencyMode": "offline-only; dependencies must be vendored in source or pinned in the immutable image",
+      "maxScratchBytes": 8589934592
+    },
+    "producerDurationMilliseconds": 15018,
+    "collected": {
+      "NativeKey": "sha256:230a1d598a2828d8bb0281f3d8262aa9f53a83126fdb7d170df692041c1a9141",
+      "MediaType": "application/vnd.layercache.oci-image-layout.v1.tar",
+      "ResultFormat": "oci-image-layout-tar",
+      "ResultMediaType": "application/vnd.oci.image.manifest.v1+json",
+      "Digest": "sha256:54c1f50ff34f2ed02d6c66ef26acb8e5d2c3cab2f4614bede9c0c2ec952bfcde",
+      "SizeBytes": 2302464
+    },
+    "archiveMembers": null,
+    "outputDigestVerified": true,
+    "nativeKeyVerified": true,
+    "realTurboRestoreVerified": null,
+    "runOutputVerified": true,
+    "layers": 4
+  }
+]

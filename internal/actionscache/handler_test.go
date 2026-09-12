@@ -2,6 +2,7 @@ package actionscache_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,7 +13,248 @@ import (
 	"time"
 
 	"github.com/layercache/layercache/internal/actionscache"
+	"github.com/layercache/layercache/internal/measurement"
 )
+
+func TestHandlerRecordsOneFinalOutcomePerActionsLookup(t *testing.T) {
+	t.Parallel()
+
+	recorder := measurement.NewRecorder()
+	handler, err := actionscache.NewHandler(actionscache.Config{
+		Project: "github.com/acme/widgets", Repository: "acme/widgets",
+		Ref: "refs/heads/main", DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
+		RequireRequestAuthority: true, RecordOutcome: recorder.Record,
+		EnrichActionsMiss: recorder.EnrichActionsMiss,
+	}, actionscache.NewMemoryStorage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := actionscache.RequestAuthority{
+		Project: "github.com/acme/widgets", Repository: "acme/widgets",
+		Ref: "refs/heads/main", DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
+		RunID: "run-actions-report", WorkspaceID: "sha256:workspace",
+	}
+	activeAuthority := authority
+	do := func(method, target string, body io.Reader) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, target, body)
+		request = request.WithContext(actionscache.WithRequestAuthority(request.Context(), activeAuthority))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	archive := []byte("measured-actions-archive")
+	cold := do(http.MethodGet, "/_apis/artifactcache/cache?keys=private-cache-key&version=v1", nil)
+	if cold.Code != http.StatusNoContent {
+		t.Fatalf("cold lookup = %d %s", cold.Code, cold.Body.String())
+	}
+	time.Sleep(5 * time.Millisecond)
+	reserve := do(http.MethodPost, "/_apis/artifactcache/caches", strings.NewReader(
+		fmt.Sprintf(`{"key":"private-cache-key","version":"v1","cacheSize":%d}`, len(archive)),
+	))
+	var reservation struct {
+		CacheID int64 `json:"cacheId"`
+	}
+	if reserve.Code != http.StatusCreated || json.Unmarshal(reserve.Body.Bytes(), &reservation) != nil {
+		t.Fatalf("reserve = %d %s", reserve.Code, reserve.Body.String())
+	}
+	uploadRequest := httptest.NewRequest(
+		http.MethodPatch, fmt.Sprintf("/_apis/artifactcache/caches/%d", reservation.CacheID), bytes.NewReader(archive),
+	)
+	uploadRequest.Header.Set("Content-Range", fmt.Sprintf("bytes 0-%d/*", len(archive)-1))
+	uploadRequest = uploadRequest.WithContext(actionscache.WithRequestAuthority(uploadRequest.Context(), activeAuthority))
+	upload := httptest.NewRecorder()
+	handler.ServeHTTP(upload, uploadRequest)
+	if upload.Code != http.StatusNoContent {
+		t.Fatalf("upload = %d %s", upload.Code, upload.Body.String())
+	}
+	commit := do(http.MethodPost, fmt.Sprintf("/_apis/artifactcache/caches/%d", reservation.CacheID), strings.NewReader(
+		fmt.Sprintf(`{"size":%d}`, len(archive)),
+	))
+	if commit.Code != http.StatusNoContent {
+		t.Fatalf("commit = %d %s", commit.Code, commit.Body.String())
+	}
+	producerReport, err := recorder.RunReport(authority.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(producerReport.Outcomes) != 1 || producerReport.Outcomes[0].ExecutionDurationMS == nil ||
+		*producerReport.Outcomes[0].ExecutionDurationMS <= 0 || producerReport.Outcomes[0].Bytes.Uploaded != int64(len(archive)) ||
+		producerReport.Outcomes[0].Timing.UploadMS < 0 {
+		t.Fatalf("correlated Actions producer outcome = %#v", producerReport)
+	}
+
+	hitAuthority := authority
+	hitAuthority.RunID = "run-actions-hit-report"
+	activeAuthority = hitAuthority
+	lookup := do(http.MethodGet, "/_apis/artifactcache/cache?keys=private-cache-key&version=v1", nil)
+	var hit lookupResponse
+	if lookup.Code != http.StatusOK || json.Unmarshal(lookup.Body.Bytes(), &hit) != nil {
+		t.Fatalf("lookup = %d %s", lookup.Code, lookup.Body.String())
+	}
+	download := httptest.NewRecorder()
+	handler.ServeHTTP(download, httptest.NewRequest(http.MethodGet, hit.ArchiveLocation, nil))
+	if download.Code != http.StatusOK || !bytes.Equal(download.Body.Bytes(), archive) {
+		t.Fatalf("download = %d %q", download.Code, download.Body.Bytes())
+	}
+	// A signed URL replay reaches the recorder again, but the immutable run/work
+	// identity keeps one final outcome in the measurement repository.
+	replay := httptest.NewRecorder()
+	handler.ServeHTTP(replay, httptest.NewRequest(http.MethodGet, hit.ArchiveLocation, nil))
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay = %d", replay.Code)
+	}
+	activeAuthority = authority
+	miss := do(http.MethodGet, "/_apis/artifactcache/cache?keys=missing-private-key&version=v1", nil)
+	if miss.Code != http.StatusNoContent {
+		t.Fatalf("miss = %d %s", miss.Code, miss.Body.String())
+	}
+
+	report, err := recorder.RunReport(authority.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Outcomes) != 2 || report.Groups != 2 || report.Eligible != 2 || report.Hits != 0 || report.Misses != 2 {
+		t.Fatalf("Actions report = %#v", report)
+	}
+	if len(report.Integrations) != 1 || report.Integrations[0].Integration != measurement.IntegrationActions ||
+		report.Integrations[0].Groups != 2 || report.Integrations[0].Eligible != 2 || report.Integrations[0].Hits != 0 {
+		t.Fatalf("Actions integration report = %#v", report.Integrations)
+	}
+	for _, outcome := range report.Outcomes {
+		if outcome.Integration != measurement.IntegrationActions || outcome.WorkspaceID != authority.WorkspaceID {
+			t.Fatalf("uncorrelated Actions outcome = %#v", outcome)
+		}
+		if strings.Contains(outcome.ArtifactID, "private") {
+			t.Fatalf("Actions cache key leaked into artifact identity %q", outcome.ArtifactID)
+		}
+		if outcome.Result == measurement.ResultMiss && outcome.ArtifactID != producerReport.Outcomes[0].ArtifactID &&
+			(outcome.Bytes.Uploaded != 0 || outcome.Timing.UploadMS != 0 || outcome.ExecutionDurationMS != nil) {
+			t.Fatalf("uncorrelated lookup miss fabricated producer measurements = %#v", outcome)
+		}
+	}
+	hitReport, err := recorder.RunReport(hitAuthority.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hitReport.Outcomes) != 1 || hitReport.Hits != 1 || hitReport.Outcomes[0].Source != measurement.SourceLocalCache ||
+		hitReport.Outcomes[0].Bytes.Downloaded != int64(len(archive)) || hitReport.Outcomes[0].ProducerDurationMS == nil ||
+		*hitReport.Outcomes[0].ProducerDurationMS != *producerReport.Outcomes[0].ExecutionDurationMS {
+		t.Fatalf("Actions hit producer duration = %#v, cold = %#v", hitReport, producerReport)
+	}
+}
+
+func TestHandlerUsesAuthenticatedRequestAuthorityAndBindsItIntoArchiveURL(t *testing.T) {
+	t.Parallel()
+
+	backend := actionscache.NewMemoryStorage()
+	authority := actionscache.RequestAuthority{
+		Repository: "acme/widgets", Ref: "refs/pull/42/merge", DefaultRef: "refs/heads/main",
+		Compatibility: "linux-amd64-node24", SourceCommit: "0123456789abcdef0123456789abcdef01234567",
+		RecipeDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Platform:     "linux/amd64", Toolchain: "actions/cache@6.2.0", Builder: "trusted-builder",
+	}
+	putArchive(t, backend, authority, "pr-isolated", "v1", []byte("pull request bytes"))
+	handler, err := actionscache.NewHandler(actionscache.Config{
+		Repository: "static/forbidden", Ref: "refs/heads/static", DefaultRef: "refs/heads/static",
+		Compatibility: "linux-amd64-node24", RequireRequestAuthority: true,
+	}, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/_apis/artifactcache/cache?keys=pr-isolated&version=v1", nil))
+	if unauthorized.Code != http.StatusBadRequest {
+		t.Fatalf("lookup without request authority returned %d, want 400", unauthorized.Code)
+	}
+
+	lookupRequest := httptest.NewRequest(http.MethodGet, "/_apis/artifactcache/cache?keys=pr-isolated&version=v1", nil)
+	lookupRequest = lookupRequest.WithContext(actionscache.WithRequestAuthority(context.Background(), authority))
+	lookupResponse := httptest.NewRecorder()
+	handler.ServeHTTP(lookupResponse, lookupRequest)
+	if lookupResponse.Code != http.StatusOK {
+		t.Fatalf("authorized lookup returned %d: %s", lookupResponse.Code, lookupResponse.Body.String())
+	}
+	var lookup struct {
+		ArchiveLocation string `json:"archiveLocation"`
+	}
+	if err := json.Unmarshal(lookupResponse.Body.Bytes(), &lookup); err != nil {
+		t.Fatal(err)
+	}
+	downloadRequest := httptest.NewRequest(http.MethodGet, lookup.ArchiveLocation, nil)
+	if !handler.AuthorizesArchiveDownload(downloadRequest) {
+		t.Fatal("signed archive URL did not carry authenticated request authority")
+	}
+	downloadResponse := httptest.NewRecorder()
+	handler.ServeHTTP(downloadResponse, downloadRequest)
+	if downloadResponse.Code != http.StatusOK || downloadResponse.Body.String() != "pull request bytes" {
+		t.Fatalf("signed authority download returned %d %q", downloadResponse.Code, downloadResponse.Body.String())
+	}
+}
+
+func TestHandlerDoesNotAcceptUncorrelatedProducerDurationFromAuthenticatedRun(t *testing.T) {
+	t.Parallel()
+
+	backend := actionscache.NewMemoryStorage()
+	handler, err := actionscache.NewHandler(actionscache.Config{
+		Project: "github.com/acme/widgets", Repository: "acme/widgets",
+		Ref: "refs/heads/main", DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
+		RequireRequestAuthority: true,
+	}, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := actionscache.RequestAuthority{
+		Project: "github.com/acme/widgets", Repository: "acme/widgets",
+		Ref: "refs/heads/main", DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
+		RunID: "run-uncorrelated", WorkspaceID: "workspace-uncorrelated",
+	}
+	do := func(method, target string, body io.Reader) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, target, body)
+		request = request.WithContext(actionscache.WithRequestAuthority(request.Context(), authority))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	payload := []byte("uncorrelated")
+	reserve := do(http.MethodPost, "/_apis/artifactcache/caches", strings.NewReader(
+		fmt.Sprintf(`{"key":"uncorrelated","version":"v1","cacheSize":%d}`, len(payload)),
+	))
+	var reservation struct {
+		CacheID int64 `json:"cacheId"`
+	}
+	if reserve.Code != http.StatusCreated || json.Unmarshal(reserve.Body.Bytes(), &reservation) != nil {
+		t.Fatalf("reserve = %d %s", reserve.Code, reserve.Body.String())
+	}
+	uploadRequest := httptest.NewRequest(
+		http.MethodPatch, fmt.Sprintf("/_apis/artifactcache/caches/%d", reservation.CacheID), bytes.NewReader(payload),
+	)
+	uploadRequest.Header.Set("Content-Range", fmt.Sprintf("bytes 0-%d/*", len(payload)-1))
+	uploadRequest = uploadRequest.WithContext(actionscache.WithRequestAuthority(uploadRequest.Context(), authority))
+	upload := httptest.NewRecorder()
+	handler.ServeHTTP(upload, uploadRequest)
+	if upload.Code != http.StatusNoContent {
+		t.Fatalf("upload = %d %s", upload.Code, upload.Body.String())
+	}
+	commit := do(http.MethodPost, fmt.Sprintf("/_apis/artifactcache/caches/%d", reservation.CacheID), strings.NewReader(
+		fmt.Sprintf(`{"size":%d,"layerCacheProducerDurationNanoseconds":%d}`, len(payload), int64(time.Hour)),
+	))
+	if commit.Code != http.StatusNoContent {
+		t.Fatalf("commit = %d %s", commit.Code, commit.Body.String())
+	}
+	result, err := backend.Lookup(context.Background(), actionscache.LookupRequest{
+		Scope: authority, Keys: []string{"uncorrelated"}, Version: "v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Entry.ProducerDuration != nil {
+		t.Fatalf("uncorrelated producer duration = %v, want unknown", result.Entry.ProducerDuration)
+	}
+}
 
 func TestLookupMissReturnsNoContent(t *testing.T) {
 	t.Parallel()

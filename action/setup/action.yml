@@ -1,0 +1,46 @@
+name: Set up Layer Cache
+description: Install Layer Cache and start an isolated Local Cache for this GitHub job.
+inputs:
+  version:
+    description: Exact immutable release tag, such as v0.1.0. Required unless binary is set.
+  repository:
+    description: GitHub OWNER/REPO publishing Layer Cache releases. Required unless binary is set.
+  github-token:
+    description: GitHub token used to download releases and verify attestations.
+    default: ${{ github.token }}
+  binary:
+    description: Explicit absolute path to a trusted preinstalled binary. Skips release installation.
+  team-url:
+    description: HTTPS Team Cache endpoint. Omit for Local Cache only.
+  team-token:
+    description: Optional project-scoped Turbo Team token. Otherwise GitHub OIDC is used.
+  project:
+    description: Team project identity. Defaults to github.com/OWNER/REPO.
+  compatibility:
+    description: Cache ABI identity. Defaults to the CLI's OS, architecture, libc, and detected toolchain identity.
+  max-size:
+    description: Maximum committed Local Cache artifact bytes.
+    default: '5368709120'
+  ttl-minutes:
+    description: Lifetime of issued job credentials, 1 to 60 minutes. Rerun setup for longer jobs.
+    default: '60'
+outputs:
+  binary:
+    description: Installed binary path.
+  config:
+    description: Job-specific configuration path for layercache commands.
+  endpoint:
+    description: Local Cache endpoint.
+  project:
+    description: Configured project identity.
+  compatibility:
+    description: Configured compatibility identity.
+  actions-token:
+    description: Masked Actions-only Local Cache capability; use with action/cache at the local endpoint.
+  expires-at:
+    description: Issued local credential expiration time.
+runs:
+  using: node24
+  main: main.mjs
+  post: post.mjs
+  post-if: always()

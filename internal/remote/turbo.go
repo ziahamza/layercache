@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/layercache/layercache/internal/artifact"
@@ -23,9 +24,11 @@ var (
 
 type TurboClient struct {
 	baseURL       string
-	token         string
 	compatibility string
 	http          *http.Client
+	transferIdle  time.Duration
+	tokenMu       sync.RWMutex
+	token         string
 }
 
 type TurboDownload struct {
@@ -39,20 +42,28 @@ type TurboDownload struct {
 // default. Callers whose outputs depend on more ABI facts should use
 // NewTurboClientForCompatibility.
 func NewTurboClient(baseURL, token string) (*TurboClient, error) {
-	return NewTurboClientForCompatibility(baseURL, token, runtime.GOOS+"-"+runtime.GOARCH+"-schema1")
+	return NewTurboClientForCompatibilityWithTimeouts(baseURL, token, runtime.GOOS+"-"+runtime.GOARCH+"-schema1", Timeouts{})
 }
 
 // NewTurboClientForCompatibility creates a Team Cache client that selects the
 // caller's compatibility namespace after bearer authentication. The Team
 // server must never substitute its own host identity for this value.
 func NewTurboClientForCompatibility(baseURL, token, compatibilityID string) (*TurboClient, error) {
+	return NewTurboClientForCompatibilityWithTimeouts(baseURL, token, compatibilityID, Timeouts{})
+}
+
+func NewTurboClientForCompatibilityWithTimeouts(baseURL, token, compatibilityID string, timeouts Timeouts) (*TurboClient, error) {
 	if err := compatibility.Validate(compatibilityID); err != nil {
 		return nil, fmt.Errorf("invalid remote cache compatibility: %w", err)
 	}
-	return newTurboClient(baseURL, token, compatibilityID)
+	return newTurboClient(baseURL, token, compatibilityID, timeouts)
 }
 
-func newTurboClient(baseURL, token, compatibilityID string) (*TurboClient, error) {
+func newTurboClient(baseURL, token, compatibilityID string, timeouts Timeouts) (*TurboClient, error) {
+	timeouts, err := normalizeTimeouts(timeouts)
+	if err != nil {
+		return nil, err
+	}
 	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return nil, fmt.Errorf("invalid remote cache URL %q", baseURL)
@@ -71,10 +82,7 @@ func newTurboClient(baseURL, token, compatibilityID string) (*TurboClient, error
 		token:         token,
 		compatibility: compatibilityID,
 		http: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: 2 * time.Second,
-			},
+			Transport: transportWithMetadataTimeout(timeouts.Metadata),
 			CheckRedirect: func(request *http.Request, _ []*http.Request) error {
 				if request.URL.Scheme != parsed.Scheme || request.URL.Host != parsed.Host {
 					return errors.New("remote cache redirect changed origin")
@@ -82,6 +90,7 @@ func newTurboClient(baseURL, token, compatibilityID string) (*TurboClient, error
 				return nil
 			},
 		},
+		transferIdle: timeouts.TransferIdle,
 	}, nil
 }
 
@@ -109,7 +118,7 @@ func (client *TurboClient) Get(ctx context.Context, hash string) (TurboDownload,
 	}
 	duration, _ := strconv.ParseInt(response.Header.Get("x-artifact-duration"), 10, 64)
 	return TurboDownload{
-		Body:           response.Body,
+		Body:           withIdleReadTimeout(response.Body, client.transferIdle),
 		ExpectedDigest: response.Header.Get("x-layercache-digest"),
 		Size:           response.ContentLength,
 		Metadata: artifact.Metadata{
@@ -120,7 +129,13 @@ func (client *TurboClient) Get(ctx context.Context, hash string) (TurboDownload,
 }
 
 func (client *TurboClient) Put(ctx context.Context, hash string, entry artifact.Entry, body io.Reader) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPut, client.baseURL+"/v8/artifacts/"+url.PathEscape(hash), body)
+	requestContext, cancel := context.WithCancel(ctx)
+	progress := newProgressReader(body, client.transferIdle, cancel)
+	defer func() {
+		progress.stop()
+		cancel()
+	}()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPut, client.baseURL+"/v8/artifacts/"+url.PathEscape(hash), progress)
 	if err != nil {
 		return err
 	}
@@ -132,6 +147,9 @@ func (client *TurboClient) Put(ctx context.Context, hash string, entry artifact.
 	}
 	response, err := client.http.Do(request)
 	if err != nil {
+		if progress.stop() {
+			return ErrTransferIdle
+		}
 		return fmt.Errorf("publish remote cache: %w", err)
 	}
 	defer response.Body.Close()
@@ -145,8 +163,25 @@ func (client *TurboClient) Put(ctx context.Context, hash string, entry artifact.
 }
 
 func (client *TurboClient) authorize(request *http.Request) {
-	request.Header.Set("Authorization", "Bearer "+client.token)
+	client.tokenMu.RLock()
+	token := client.token
+	client.tokenMu.RUnlock()
+	request.Header.Set("Authorization", "Bearer "+token)
 	if client.compatibility != "" {
 		request.Header.Set(compatibility.Header, client.compatibility)
 	}
+}
+
+// SetToken atomically rotates the bearer credential used by subsequent Team
+// Cache requests. In-flight requests retain the credential with which they
+// started.
+func (client *TurboClient) SetToken(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("remote cache token is required")
+	}
+	client.tokenMu.Lock()
+	client.token = token
+	client.tokenMu.Unlock()
+	return nil
 }

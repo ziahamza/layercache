@@ -1,0 +1,49 @@
+name: Native Public Build qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-build-native-arm64
+  cancel-in-progress: false
+
+jobs:
+  arm64-kvm:
+    name: Reviewed Public Builds / Linux arm64 KVM
+    # This root-capable worker must never execute pull_request workflows. Only
+    # the protected main branch is eligible for an explicit manual dispatch.
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, ARM64, layercache-kvm]
+    timeout-minutes: 90
+    env:
+      KERNEL: ${{ vars.LAYERCACHE_QA_ARM64_KERNEL }}
+      KERNEL_SHA256: ${{ vars.LAYERCACHE_QA_ARM64_KERNEL_SHA256 }}
+      CGROUP_PARENT: ${{ vars.LAYERCACHE_QA_CGROUP_PARENT }}
+      REGISTRY_REPOSITORY: ${{ vars.LAYERCACHE_QA_REGISTRY_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Require the reviewed native worker and explicit operator configuration
+        run: |
+          if test "$(id -u)" -ne 0; then sudo -n true; fi
+          test -n "$KERNEL"
+          test -n "$KERNEL_SHA256"
+          test -n "$CGROUP_PARENT"
+          test -n "$REGISTRY_REPOSITORY"
+          echo "EVIDENCE=$RUNNER_TEMP/layercache-arm64-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          bash qa/public-build-kvm/run-native.sh --check arm64
+      - name: Build guest assets and exercise the real KVM integrations
+        run: |
+          bash qa/public-build-kvm/run-native.sh arm64 \
+            "$KERNEL" "$KERNEL_SHA256" "$CGROUP_PARENT" \
+            "$REGISTRY_REPOSITORY/run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$EVIDENCE"
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-build-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/layercache-arm64-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 30

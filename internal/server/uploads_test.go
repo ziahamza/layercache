@@ -260,7 +260,7 @@ func TestRestartUploadsQueuedTurboArtifactWithOriginalCompatibility(t *testing.T
 			TeamURL: team.URL, TeamToken: "team-token", ProjectID: key.Project,
 			CompatibilityID: currentCompatibility,
 		},
-		store: store, uploads: queue, team: currentClient, uploadContext: ctx,
+		store: store, uploads: queue, team: currentClient, teamToken: "team-token", uploadContext: ctx,
 	}
 	if err := afterRestart.reconcileUploadPins(ctx); err != nil {
 		t.Fatal(err)

@@ -1,0 +1,7 @@
+{
+  "name": "@layercache/minimum-fixture-app",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

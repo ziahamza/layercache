@@ -21,6 +21,11 @@ const (
 	defaultResponseHeaderTimeout = 2 * time.Second
 	defaultTransferIdleTimeout   = 30 * time.Second
 	maxRemoteResponseSize        = 1 << 20
+	maxRemoteEntryMetadata       = 4_096
+	maxRemoteReservationMetadata = 4_096
+	remoteLookupMetadataTTL      = 10 * time.Minute
+	remoteEntryMetadataTTL       = 24 * time.Hour
+	remoteReservationMetadataTTL = 24 * time.Hour
 )
 
 var ErrTransferIdleTimeout = errors.New("remote cache transfer made no progress before the idle timeout")
@@ -38,19 +43,36 @@ type RemoteStorageConfig struct {
 // its native exact, prefix, and ref matching rules.
 type RemoteStorage struct {
 	endpoint            *url.URL
-	token               string
 	client              *http.Client
 	transferIdleTimeout time.Duration
+	tokenMu             sync.RWMutex
+	token               string
 
 	mu           sync.Mutex
-	locations    map[remoteEntryIdentity]*url.URL
-	entries      map[remoteEntryIdentity]Entry
-	reservations map[int64]ReserveRequest
+	locations    map[remoteEntryIdentity]remoteLocationMetadata
+	entries      map[remoteEntryIdentity]remoteEntryMetadata
+	scopes       map[remoteEntryIdentity]time.Time
+	reservations map[int64]remoteReservationMetadata
 }
 
 type remoteEntryIdentity struct {
 	id    int64
 	scope Scope
+}
+
+type remoteLocationMetadata struct {
+	location *url.URL
+	expires  time.Time
+}
+
+type remoteEntryMetadata struct {
+	entry   Entry
+	expires time.Time
+}
+
+type remoteReservationMetadata struct {
+	request ReserveRequest
+	expires time.Time
 }
 
 func NewRemoteStorage(config RemoteStorageConfig) (*RemoteStorage, error) {
@@ -95,8 +117,20 @@ func NewRemoteStorage(config RemoteStorageConfig) (*RemoteStorage, error) {
 		token:    strings.TrimSpace(config.Token),
 		client: &http.Client{
 			Transport: transport,
-			CheckRedirect: func(request *http.Request, _ []*http.Request) error {
+			CheckRedirect: func(request *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return errors.New("remote Actions cache redirect limit exceeded")
+				}
+				if request.URL.Scheme != "https" && !(request.URL.Scheme == "http" && isLoopbackHost(request.URL.Hostname())) {
+					return errors.New("remote Actions cache redirect must use HTTPS except on loopback")
+				}
+				if request.URL.User != nil || request.URL.Fragment != "" {
+					return errors.New("remote Actions cache redirect target is unsafe")
+				}
 				if request.URL.Scheme != endpoint.Scheme || request.URL.Host != endpoint.Host {
+					if len(via) > 0 && via[0].Header.Get("Authorization") != "" {
+						return errors.New("authenticated remote Actions cache redirect changed origin")
+					}
 					request.Header.Del("Authorization")
 					request.Header.Del(compatibility.Header)
 				}
@@ -104,9 +138,10 @@ func NewRemoteStorage(config RemoteStorageConfig) (*RemoteStorage, error) {
 			},
 		},
 		transferIdleTimeout: transferIdleTimeout,
-		locations:           make(map[remoteEntryIdentity]*url.URL),
-		entries:             make(map[remoteEntryIdentity]Entry),
-		reservations:        make(map[int64]ReserveRequest),
+		locations:           make(map[remoteEntryIdentity]remoteLocationMetadata),
+		entries:             make(map[remoteEntryIdentity]remoteEntryMetadata),
+		scopes:              make(map[remoteEntryIdentity]time.Time),
+		reservations:        make(map[int64]remoteReservationMetadata),
 	}, nil
 }
 
@@ -132,11 +167,12 @@ func (storage *RemoteStorage) Lookup(ctx context.Context, request LookupRequest)
 		return LookupResult{}, remoteStatusError(response, "lookup remote Actions cache")
 	}
 	var body struct {
-		CacheKey        string    `json:"cacheKey"`
-		Scope           string    `json:"scope"`
-		CacheVersion    string    `json:"cacheVersion"`
-		CreationTime    time.Time `json:"creationTime"`
-		ArchiveLocation string    `json:"archiveLocation"`
+		CacheKey                              string    `json:"cacheKey"`
+		Scope                                 string    `json:"scope"`
+		CacheVersion                          string    `json:"cacheVersion"`
+		CreationTime                          time.Time `json:"creationTime"`
+		ArchiveLocation                       string    `json:"archiveLocation"`
+		LayerCacheProducerDurationNanoseconds *int64    `json:"layerCacheProducerDurationNanoseconds"`
 	}
 	if err := decodeRemoteJSON(response.Body, &body); err != nil {
 		return LookupResult{}, fmt.Errorf("decode remote Actions cache lookup: %w", err)
@@ -145,11 +181,21 @@ func (storage *RemoteStorage) Lookup(ctx context.Context, request LookupRequest)
 	if err != nil {
 		return LookupResult{}, err
 	}
-	entry := Entry{ID: id, Key: body.CacheKey, Version: body.CacheVersion, Ref: body.Scope, CreatedAt: body.CreationTime}
+	if body.LayerCacheProducerDurationNanoseconds != nil && *body.LayerCacheProducerDurationNanoseconds < 0 {
+		return LookupResult{}, errors.New("remote Actions cache returned a negative producer duration")
+	}
+	var producerDuration *time.Duration
+	if body.LayerCacheProducerDurationNanoseconds != nil {
+		value := time.Duration(*body.LayerCacheProducerDurationNanoseconds)
+		producerDuration = &value
+	}
+	entry := Entry{
+		ID: id, Key: body.CacheKey, Version: body.CacheVersion, Ref: body.Scope,
+		CreatedAt: body.CreationTime, ProducerDuration: producerDuration,
+	}
 	identity := remoteEntryIdentity{id: id, scope: request.Scope}
 	storage.mu.Lock()
-	storage.locations[identity] = location
-	storage.entries[identity] = entry
+	storage.rememberEntryLocked(identity, entry, location, remoteLookupMetadataTTL, time.Now().UTC())
 	storage.mu.Unlock()
 	match, requestedKey := remoteMatchMetadata(response, request, entry.Key)
 	refScope := RefScope(response.Header.Get("X-LayerCache-Ref-Scope"))
@@ -221,7 +267,17 @@ func (storage *RemoteStorage) Reserve(ctx context.Context, request ReserveReques
 		return Reservation{}, errors.New("remote Actions cache returned an invalid reservation ID")
 	}
 	storage.mu.Lock()
-	storage.reservations[result.CacheID] = cloneReserveRequest(request)
+	storage.pruneMetadataLocked(time.Now().UTC())
+	if len(storage.reservations) >= maxRemoteReservationMetadata {
+		storage.mu.Unlock()
+		abortErr := storage.abortRemoteReservation(ctx, result.CacheID, request.Scope.Compatibility)
+		return Reservation{}, errors.Join(
+			errors.New("remote Actions cache has too many unfinished reservations"), abortErr,
+		)
+	}
+	storage.reservations[result.CacheID] = remoteReservationMetadata{
+		request: cloneReserveRequest(request), expires: time.Now().UTC().Add(remoteReservationMetadataTTL),
+	}
 	storage.mu.Unlock()
 	return Reservation{ID: result.CacheID}, nil
 }
@@ -232,11 +288,13 @@ func (storage *RemoteStorage) Upload(ctx context.Context, request UploadRequest)
 	}
 	target := storage.route(fmt.Sprintf("/_apis/artifactcache/caches/%d", request.ReservationID))
 	storage.mu.Lock()
-	reservation, found := storage.reservations[request.ReservationID]
+	storage.pruneMetadataLocked(time.Now().UTC())
+	metadata, found := storage.reservations[request.ReservationID]
 	storage.mu.Unlock()
 	if !found {
 		return errors.New("upload remote Actions cache for an unknown reservation")
 	}
+	reservation := metadata.request
 	requestContext, cancel := context.WithCancelCause(ctx)
 	watch := newIdleWatch(cancel, storage.transferIdleTimeout)
 	body := &progressReader{reader: request.Body, progress: watch.Progress}
@@ -260,8 +318,10 @@ func (storage *RemoteStorage) Upload(ctx context.Context, request UploadRequest)
 		return fmt.Errorf("upload remote Actions cache: %w", err)
 	}
 	cancel(nil)
+	response.Body = newIdleTimeoutReadCloser(response.Body, storage.transferIdleTimeout)
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
+		storage.forgetReservation(request.ReservationID)
 		return ErrNotFound
 	}
 	if response.StatusCode == http.StatusBadRequest {
@@ -274,15 +334,21 @@ func (storage *RemoteStorage) Upload(ctx context.Context, request UploadRequest)
 }
 
 func (storage *RemoteStorage) Commit(ctx context.Context, request CommitRequest) (Entry, error) {
+	if request.ProducerDuration != nil && *request.ProducerDuration < 0 {
+		return Entry{}, ErrInvalidUpload
+	}
 	storage.mu.Lock()
-	reservation, found := storage.reservations[request.ReservationID]
+	storage.pruneMetadataLocked(time.Now().UTC())
+	metadata, found := storage.reservations[request.ReservationID]
 	storage.mu.Unlock()
 	if !found {
 		return Entry{}, errors.New("commit remote Actions cache for an unknown reservation")
 	}
+	reservation := metadata.request
 	body, err := json.Marshal(struct {
-		Size int64 `json:"size"`
-	}{Size: request.Size})
+		Size                                  int64  `json:"size"`
+		LayerCacheProducerDurationNanoseconds *int64 `json:"layerCacheProducerDurationNanoseconds,omitempty"`
+	}{Size: request.Size, LayerCacheProducerDurationNanoseconds: durationNanoseconds(request.ProducerDuration)})
 	if err != nil {
 		return Entry{}, err
 	}
@@ -293,6 +359,7 @@ func (storage *RemoteStorage) Commit(ctx context.Context, request CommitRequest)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
+		storage.forgetReservation(request.ReservationID)
 		return Entry{}, ErrNotFound
 	}
 	if response.StatusCode == http.StatusBadRequest {
@@ -312,12 +379,38 @@ func (storage *RemoteStorage) Commit(ctx context.Context, request CommitRequest)
 	entry := Entry{
 		ID: request.ReservationID, Key: reservation.Key, Version: reservation.Version,
 		Ref: reservation.Scope.Ref, Size: request.Size, CreatedAt: time.Now().UTC(),
+		ProducerDuration: cloneDuration(request.ProducerDuration),
 	}
 	identity := remoteEntryIdentity{id: entry.ID, scope: reservation.Scope}
 	storage.mu.Lock()
-	storage.entries[identity] = entry
+	storage.rememberEntryLocked(identity, entry, nil, remoteEntryMetadataTTL, time.Now().UTC())
 	storage.mu.Unlock()
 	return entry, nil
+}
+
+func (storage *RemoteStorage) Abort(ctx context.Context, reservationID int64) error {
+	storage.mu.Lock()
+	storage.pruneMetadataLocked(time.Now().UTC())
+	metadata, found := storage.reservations[reservationID]
+	storage.mu.Unlock()
+	if !found {
+		return ErrNotFound
+	}
+	reservation := metadata.request
+	target := storage.route(fmt.Sprintf("/_apis/artifactcache/caches/%d", reservationID))
+	response, err := storage.do(ctx, http.MethodDelete, target, nil, "", reservation.Scope.Compatibility)
+	if err != nil {
+		return fmt.Errorf("abort remote Actions cache reservation: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound {
+		return remoteStatusError(response, "abort remote Actions cache reservation")
+	}
+	storage.forgetReservation(reservationID)
+	if response.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (storage *RemoteStorage) Open(ctx context.Context, request OpenRequest) (Archive, error) {
@@ -326,11 +419,13 @@ func (storage *RemoteStorage) Open(ctx context.Context, request OpenRequest) (Ar
 	}
 	identity := remoteEntryIdentity{id: request.ID, scope: request.Scope}
 	storage.mu.Lock()
-	location := storage.locations[identity]
-	entry, knownEntry := storage.entries[identity]
-	knownID := knownEntry
+	storage.pruneMetadataLocked(time.Now().UTC())
+	locationMetadata, knownLocation := storage.locations[identity]
+	entryMetadata, knownEntry := storage.entries[identity]
+	_, knownScope := storage.scopes[identity]
+	knownID := knownScope
 	if !knownID {
-		for known := range storage.entries {
+		for known := range storage.scopes {
 			if known.id == request.ID {
 				knownID = true
 				break
@@ -338,9 +433,14 @@ func (storage *RemoteStorage) Open(ctx context.Context, request OpenRequest) (Ar
 		}
 	}
 	storage.mu.Unlock()
-	if knownID && !knownEntry {
+	if knownID && !knownScope {
 		return Archive{}, ErrNotFound
 	}
+	var location *url.URL
+	if knownLocation {
+		location = locationMetadata.location
+	}
+	entry := entryMetadata.entry
 	if location == nil && knownEntry && entry.Key != "" && entry.Version != "" {
 		lookup, err := storage.Lookup(ctx, LookupRequest{
 			Scope: request.Scope, Keys: []string{entry.Key}, Version: entry.Version,
@@ -352,9 +452,15 @@ func (storage *RemoteStorage) Open(ctx context.Context, request OpenRequest) (Ar
 			return Archive{}, ErrNotFound
 		}
 		storage.mu.Lock()
-		location = storage.locations[identity]
-		entry = storage.entries[identity]
+		locationMetadata, knownLocation = storage.locations[identity]
+		entryMetadata, knownEntry = storage.entries[identity]
 		storage.mu.Unlock()
+		if knownLocation {
+			location = locationMetadata.location
+		}
+		if knownEntry {
+			entry = entryMetadata.entry
+		}
 	}
 	directRequest := location == nil
 	if location == nil {
@@ -389,6 +495,10 @@ func (storage *RemoteStorage) Open(ctx context.Context, request OpenRequest) (Ar
 	if response.ContentLength >= 0 {
 		entry.Size = response.ContentLength
 	}
+	storage.mu.Lock()
+	delete(storage.locations, identity)
+	delete(storage.entries, identity)
+	storage.mu.Unlock()
 	watch := newIdleWatch(cancel, storage.transferIdleTimeout)
 	return Archive{
 		Entry: entry,
@@ -396,6 +506,89 @@ func (storage *RemoteStorage) Open(ctx context.Context, request OpenRequest) (Ar
 			body: response.Body, context: requestContext, cancel: cancel, watch: watch,
 		},
 	}, nil
+}
+
+func (storage *RemoteStorage) rememberEntryLocked(
+	identity remoteEntryIdentity,
+	entry Entry,
+	location *url.URL,
+	ttl time.Duration,
+	now time.Time,
+) {
+	storage.pruneMetadataLocked(now)
+	if _, known := storage.scopes[identity]; !known && len(storage.scopes) >= maxRemoteEntryMetadata {
+		storage.evictOldestScopeLocked()
+	}
+	storage.scopes[identity] = now.Add(remoteEntryMetadataTTL)
+	storage.entries[identity] = remoteEntryMetadata{entry: entry, expires: now.Add(ttl)}
+	if location == nil {
+		delete(storage.locations, identity)
+	} else {
+		storage.locations[identity] = remoteLocationMetadata{location: location, expires: now.Add(ttl)}
+	}
+}
+
+func (storage *RemoteStorage) pruneMetadataLocked(now time.Time) {
+	for identity, expires := range storage.scopes {
+		if !now.Before(expires) {
+			delete(storage.scopes, identity)
+			delete(storage.entries, identity)
+			delete(storage.locations, identity)
+		}
+	}
+	for identity, metadata := range storage.entries {
+		if !now.Before(metadata.expires) {
+			delete(storage.entries, identity)
+			delete(storage.locations, identity)
+		}
+	}
+	for identity, metadata := range storage.locations {
+		if !now.Before(metadata.expires) {
+			delete(storage.locations, identity)
+		}
+	}
+	for id, metadata := range storage.reservations {
+		if !now.Before(metadata.expires) {
+			delete(storage.reservations, id)
+		}
+	}
+}
+
+func (storage *RemoteStorage) evictOldestScopeLocked() {
+	var oldest remoteEntryIdentity
+	var oldestExpiry time.Time
+	for identity, expires := range storage.scopes {
+		if oldestExpiry.IsZero() || expires.Before(oldestExpiry) {
+			oldest = identity
+			oldestExpiry = expires
+		}
+	}
+	if oldestExpiry.IsZero() {
+		return
+	}
+	delete(storage.scopes, oldest)
+	delete(storage.entries, oldest)
+	delete(storage.locations, oldest)
+}
+
+func (storage *RemoteStorage) forgetReservation(id int64) {
+	storage.mu.Lock()
+	delete(storage.reservations, id)
+	storage.mu.Unlock()
+}
+
+func (storage *RemoteStorage) abortRemoteReservation(ctx context.Context, id int64, compatibilityID string) error {
+	response, err := storage.do(
+		ctx, http.MethodDelete, storage.route(fmt.Sprintf("/_apis/artifactcache/caches/%d", id)), nil, "", compatibilityID,
+	)
+	if err != nil {
+		return fmt.Errorf("abort untracked remote Actions cache reservation: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound {
+		return remoteStatusError(response, "abort untracked remote Actions cache reservation")
+	}
+	return nil
 }
 
 func (storage *RemoteStorage) do(ctx context.Context, method string, target *url.URL, body io.Reader, contentType, compatibilityID string) (*http.Response, error) {
@@ -407,14 +600,36 @@ func (storage *RemoteStorage) do(ctx context.Context, method string, target *url
 		request.Header.Set("Content-Type", contentType)
 	}
 	storage.authorize(request, compatibilityID)
-	return storage.client.Do(request)
+	response, err := storage.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	response.Body = newIdleTimeoutReadCloser(response.Body, storage.transferIdleTimeout)
+	return response, nil
 }
 
 func (storage *RemoteStorage) authorize(request *http.Request, compatibilityID string) {
 	if request.URL.Scheme == storage.endpoint.Scheme && request.URL.Host == storage.endpoint.Host {
-		request.Header.Set("Authorization", "Bearer "+storage.token)
+		storage.tokenMu.RLock()
+		token := storage.token
+		storage.tokenMu.RUnlock()
+		request.Header.Set("Authorization", "Bearer "+token)
 		request.Header.Set(compatibility.Header, compatibilityID)
 	}
+}
+
+// SetToken atomically rotates the bearer credential used by subsequent Team
+// Cache requests. In-flight requests retain the credential with which they
+// started.
+func (storage *RemoteStorage) SetToken(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("remote Actions cache bearer token is required")
+	}
+	storage.tokenMu.Lock()
+	storage.token = token
+	storage.tokenMu.Unlock()
+	return nil
 }
 
 func (storage *RemoteStorage) route(path string) *url.URL {
@@ -506,6 +721,58 @@ type idleWatch struct {
 	timer   *time.Timer
 	timeout time.Duration
 	stopped bool
+}
+
+type idleTimeoutReadCloser struct {
+	body     io.ReadCloser
+	timeout  time.Duration
+	mu       sync.Mutex
+	timer    *time.Timer
+	timedOut bool
+	closed   bool
+}
+
+func newIdleTimeoutReadCloser(body io.ReadCloser, timeout time.Duration) io.ReadCloser {
+	reader := &idleTimeoutReadCloser{body: body, timeout: timeout}
+	reader.timer = time.AfterFunc(timeout, reader.expire)
+	return reader
+}
+
+func (reader *idleTimeoutReadCloser) expire() {
+	reader.mu.Lock()
+	if reader.closed {
+		reader.mu.Unlock()
+		return
+	}
+	reader.timedOut = true
+	reader.mu.Unlock()
+	_ = reader.body.Close()
+}
+
+func (reader *idleTimeoutReadCloser) Read(buffer []byte) (int, error) {
+	count, err := reader.body.Read(buffer)
+	reader.mu.Lock()
+	if count > 0 && !reader.closed && !reader.timedOut {
+		reader.timer.Reset(reader.timeout)
+	}
+	timedOut := reader.timedOut
+	reader.mu.Unlock()
+	if timedOut && err != nil {
+		return count, ErrTransferIdleTimeout
+	}
+	return count, err
+}
+
+func (reader *idleTimeoutReadCloser) Close() error {
+	reader.mu.Lock()
+	if reader.closed {
+		reader.mu.Unlock()
+		return nil
+	}
+	reader.closed = true
+	reader.timer.Stop()
+	reader.mu.Unlock()
+	return reader.body.Close()
 }
 
 func newIdleWatch(cancel context.CancelCauseFunc, timeout time.Duration) *idleWatch {

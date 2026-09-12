@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/layercache/layercache/internal/config"
+	"github.com/layercache/layercache/internal/credentials"
 )
 
 const ownershipMarkerName = ".layercache-owned.json"
@@ -30,12 +32,18 @@ type diagnosticCheck struct {
 type ownershipMarker struct {
 	InstallationID string `json:"installationId"`
 	ConfigPath     string `json:"configPath"`
+	Preserved      bool   `json:"preserved,omitempty"`
 }
 
 type pidRepairResult struct {
 	Changed bool
 	Removed bool
 	Rebuilt bool
+	State   string
+}
+
+type integrationStateRepairResult struct {
+	Changed bool
 	State   string
 }
 
@@ -48,7 +56,10 @@ func redactedConfiguration(cfg config.Config) map[string]any {
 	if err := json.Unmarshal(data, &result); err != nil {
 		return map[string]any{"error": "configuration could not be rendered"}
 	}
-	for _, field := range []string{"localToken", "teamToken", "publisherToken", "publicPrivateKey"} {
+	for _, field := range []string{
+		"localToken", "teamToken", "publicAccessToken", "publisherToken", "publicBuildWorkerToken", "publicCollectorToken", "publicPrivateKey",
+		"cloudPostgresUrl", "cloudS3AccessKey", "cloudS3SecretKey",
+	} {
 		if value, present := result[field]; present && value != "" {
 			result[field] = "[redacted]"
 		}
@@ -56,7 +67,7 @@ func redactedConfiguration(cfg config.Config) map[string]any {
 	return result
 }
 
-func runDoctor(args []string, stdout, stderr io.Writer) error {
+func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defaultPath, err := config.DefaultPath()
 	if err != nil {
 		return err
@@ -75,26 +86,180 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	}
 	configCheck := inspectConfigPermissions(*configPath)
 	dataCheck := inspectDataDirectory(cfg, *configPath)
-	runtimeStatus, runtimeErr := probeRuntime(cfg)
-	runtimeCheck := diagnosticCheck{OK: runtimeErr == nil && runtimeStatus.Running, Detail: "runtime is healthy"}
-	if runtimeErr != nil {
-		runtimeCheck.Detail = "runtime is not reachable: " + runtimeErr.Error()
-	} else if !runtimeStatus.Running {
-		runtimeCheck.Detail = "runtime responded but did not report healthy"
+	operational := inspectOperationalStatus(ctx, cfg)
+	runtimeCheck := diagnosticCheck{OK: operational.Running, Detail: "runtime is healthy"}
+	if !operational.Running {
+		runtimeCheck.Detail = "runtime is not reachable"
+	}
+	integrationCheck := inspectIntegrationHealth(operational)
+	remoteCheck := inspectRemoteHealth(operational)
+	credentialCheck := inspectCredentialHealth(operational)
+	cacheCheck := inspectCacheHealth(cfg, operational)
+	degradedCheck := inspectDegradedHealth(operational)
+	publicBuildCheck := inspectPublicBuildHealth(operational)
+	healthy := configCheck.OK && dataCheck.OK && runtimeCheck.OK && integrationCheck.OK &&
+		remoteCheck.OK && credentialCheck.OK && cacheCheck.OK && degradedCheck.OK && publicBuildCheck.OK
+	checks := map[string]diagnosticCheck{
+		"config":       configCheck,
+		"dataDir":      dataCheck,
+		"runtime":      runtimeCheck,
+		"integrations": integrationCheck,
+		"remotes":      remoteCheck,
+		"credentials":  credentialCheck,
+		"localCache":   cacheCheck,
+		"degraded":     degradedCheck,
+		"publicBuild":  publicBuildCheck,
 	}
 	result := map[string]any{
-		"healthy": configCheck.OK && dataCheck.OK && runtimeCheck.OK,
-		"checks": map[string]diagnosticCheck{
-			"config":  configCheck,
-			"dataDir": dataCheck,
-			"runtime": runtimeCheck,
-		},
+		"healthy": healthy,
+		"status":  operational,
+		"checks":  checks,
 	}
+	if *jsonOutput {
+		return printResult(stdout, true, result, "")
+	}
+	return printDoctorResult(stdout, healthy, checks)
+}
+
+func printDoctorResult(output io.Writer, healthy bool, checks map[string]diagnosticCheck) error {
 	message := "Layer Cache diagnostics passed"
-	if healthy, _ := result["healthy"].(bool); !healthy {
+	if !healthy {
 		message = "Layer Cache diagnostics found problems"
 	}
-	return printResult(stdout, *jsonOutput, result, message)
+	if _, err := fmt.Fprintln(output, message); err != nil {
+		return err
+	}
+	for _, item := range []struct {
+		key   string
+		label string
+	}{
+		{key: "config", label: "Configuration"},
+		{key: "dataDir", label: "Local Cache directory"},
+		{key: "runtime", label: "Runtime"},
+		{key: "integrations", label: "Integrations"},
+		{key: "remotes", label: "Remote caches"},
+		{key: "credentials", label: "Credentials"},
+		{key: "localCache", label: "Local Cache capacity"},
+		{key: "degraded", label: "Recent degraded behavior"},
+		{key: "publicBuild", label: "Public Build"},
+	} {
+		check := checks[item.key]
+		state := "problem"
+		if check.OK {
+			state = "ok"
+		}
+		if _, err := fmt.Fprintf(output, "[%s] %s: %s\n", state, item.label, check.Detail); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func inspectIntegrationHealth(status operationalStatus) diagnosticCheck {
+	problems := make([]string, 0)
+	for name, integration := range status.Integrations {
+		if integration.Configured && integration.State != "active" && integration.State != "bypassed" {
+			problems = append(problems, name+"="+integration.State)
+		}
+	}
+	slices.Sort(problems)
+	if len(problems) > 0 {
+		return diagnosticCheck{Detail: "integration configuration needs attention: " + strings.Join(problems, ", ")}
+	}
+	if len(status.ActiveIntegrations) == 0 {
+		if len(status.DetectedIntegrations) > 0 {
+			return diagnosticCheck{Detail: "detected integrations are not configured: " + strings.Join(status.DetectedIntegrations, ", ")}
+		}
+		return diagnosticCheck{OK: true, Detail: "no cache integrations were detected or configured"}
+	}
+	return diagnosticCheck{OK: true, Detail: "active integrations: " + strings.Join(status.ActiveIntegrations, ", ")}
+}
+
+func inspectRemoteHealth(status operationalStatus) diagnosticCheck {
+	problems := make([]string, 0)
+	configured := make([]string, 0)
+	for name, remote := range status.RemoteReachability {
+		if !remote.Configured {
+			continue
+		}
+		configured = append(configured, name)
+		if !remote.Reachable {
+			problems = append(problems, name+"="+remote.State)
+		}
+	}
+	slices.Sort(configured)
+	slices.Sort(problems)
+	if len(problems) > 0 {
+		return diagnosticCheck{Detail: "remote reachability failed: " + strings.Join(problems, ", ")}
+	}
+	if len(configured) == 0 {
+		return diagnosticCheck{OK: true, Detail: "no remote cache is configured"}
+	}
+	return diagnosticCheck{OK: true, Detail: "reachable remotes: " + strings.Join(configured, ", ")}
+}
+
+func inspectCredentialHealth(status operationalStatus) diagnosticCheck {
+	problems := make([]string, 0)
+	states := make([]string, 0)
+	for name, credential := range status.Credentials {
+		if !credential.Configured {
+			continue
+		}
+		states = append(states, name+"="+credential.State)
+		if credential.State == "missing" || credential.State == "expired" {
+			problems = append(problems, name+"="+credential.State)
+		}
+	}
+	slices.Sort(states)
+	slices.Sort(problems)
+	if len(problems) > 0 {
+		return diagnosticCheck{Detail: "credentials need login or rotation: " + strings.Join(problems, ", ")}
+	}
+	if len(states) == 0 {
+		return diagnosticCheck{OK: true, Detail: "no remote credentials are required"}
+	}
+	return diagnosticCheck{OK: true, Detail: "credential states: " + strings.Join(states, ", ")}
+}
+
+func inspectCacheHealth(cfg config.Config, status operationalStatus) diagnosticCheck {
+	if status.UsageBytes > status.MaxBytes {
+		return diagnosticCheck{Detail: fmt.Sprintf("Local Cache uses %d bytes, above its %d-byte limit", status.UsageBytes, status.MaxBytes)}
+	}
+	if status.PendingUploadBytes > cfg.MaxBytes {
+		return diagnosticCheck{Detail: fmt.Sprintf("pending Team uploads use %d bytes, above the %d-byte queue limit", status.PendingUploadBytes, cfg.MaxBytes)}
+	}
+	var filesystem syscall.Statfs_t
+	if err := syscall.Statfs(cfg.DataDir, &filesystem); err != nil {
+		return diagnosticCheck{Detail: "cannot inspect Local Cache filesystem capacity"}
+	}
+	available := int64(filesystem.Bavail) * int64(filesystem.Bsize)
+	if available < cfg.MinFreeBytes {
+		return diagnosticCheck{Detail: fmt.Sprintf("Local Cache filesystem has %d bytes free, below the %d-byte reserve", available, cfg.MinFreeBytes)}
+	}
+	return diagnosticCheck{OK: true, Detail: fmt.Sprintf("Local Cache uses %d of %d bytes; filesystem has %d bytes free", status.UsageBytes, status.MaxBytes, available)}
+}
+
+func inspectDegradedHealth(status operationalStatus) diagnosticCheck {
+	if status.RecentDegraded.Available && status.RecentDegraded.Observed {
+		return diagnosticCheck{Detail: "a cache operation reported degraded behavior in the last 24 hours"}
+	}
+	if !status.RecentDegraded.Available && status.Running {
+		return diagnosticCheck{Detail: "recent degraded behavior could not be read from the running runtime"}
+	}
+	if !status.Running {
+		return diagnosticCheck{Detail: "recent degraded behavior is unavailable while the runtime is stopped"}
+	}
+	return diagnosticCheck{OK: true, Detail: "no degraded cache operation was recorded in the last 24 hours"}
+}
+
+func inspectPublicBuildHealth(status operationalStatus) diagnosticCheck {
+	if !status.PublicBuild.Enabled {
+		return diagnosticCheck{OK: true, Detail: "Public Build is not configured"}
+	}
+	if status.PublicBuild.State == "unavailable" {
+		return diagnosticCheck{Detail: "Public Build state is unavailable"}
+	}
+	return diagnosticCheck{OK: true, Detail: "Public Build state: " + status.PublicBuild.State}
 }
 
 func inspectConfigPermissions(path string) diagnosticCheck {
@@ -128,7 +293,7 @@ func inspectDataDirectory(cfg config.Config, configPath string) diagnosticCheck 
 	return diagnosticCheck{OK: true, Detail: "Local Cache directory is present and owned by this installation"}
 }
 
-func runRepair(args []string, stdout, stderr io.Writer) error {
+func runRepair(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defaultPath, err := config.DefaultPath()
 	if err != nil {
 		return err
@@ -147,8 +312,20 @@ func runRepair(args []string, stdout, stderr io.Writer) error {
 	if cfg.InstallationID == "" {
 		return errors.New("configuration predates ownership tracking; rerun layercache setup before repair")
 	}
+	unlockConfiguration, err := lockConfiguration(ctx, *configPath)
+	if err != nil {
+		return err
+	}
+	defer unlockConfiguration()
+	cfg, err = config.Load(*configPath)
+	if err != nil {
+		return fmt.Errorf("reload Layer Cache configuration after locking repair: %w", err)
+	}
 	if err := validateDeletionTarget(cfg.DataDir); err != nil {
 		return fmt.Errorf("refusing to repair unsafe Local Cache directory: %w", err)
+	}
+	if err := rejectOwnershipConflict(cfg, *configPath); err != nil {
+		return fmt.Errorf("refusing to repair unproven Local Cache ownership: %w", err)
 	}
 
 	createdDataDir := false
@@ -165,20 +342,59 @@ func runRepair(args []string, stdout, stderr io.Writer) error {
 	if err := ensureOwnershipMarker(cfg, *configPath); err != nil {
 		return err
 	}
+	unlockIntegrations, err := lockIntegrationState(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer unlockIntegrations()
+	integrationRepair, err := repairIntegrationOwnershipState(cfg)
+	if err != nil {
+		return err
+	}
 
 	pidRepair, err := repairPIDFile(cfg)
 	if err != nil {
 		return err
 	}
 	result := map[string]any{
-		"repaired":                createdDataDir || pidRepair.Changed,
+		"repaired":                createdDataDir || pidRepair.Changed || integrationRepair.Changed,
 		"createdDataDir":          createdDataDir,
 		"removedStalePid":         pidRepair.Removed,
 		"rebuiltRuntimeOwnership": pidRepair.Rebuilt,
 		"pidState":                pidRepair.State,
+		"integrationState":        integrationRepair.State,
 		"dataDir":                 cfg.DataDir,
 	}
 	return printResult(stdout, *jsonOutput, result, "Layer Cache repair complete")
+}
+
+func repairIntegrationOwnershipState(cfg config.Config) (integrationStateRepairResult, error) {
+	statePath := integrationStatePath(cfg)
+	stateData, stateExists, stateReadErr := readRegularFile(statePath, 1<<20)
+	if stateReadErr == nil && stateExists {
+		if _, err := decodeIntegrationState(cfg, stateData); err == nil {
+			return integrationStateRepairResult{State: "healthy"}, nil
+		}
+	}
+	if stateReadErr == nil && !stateExists {
+		if _, recoveryExists, err := readRegularFile(integrationStateRecoveryPath(cfg), 1<<20); err == nil && !recoveryExists {
+			return integrationStateRepairResult{State: "absent"}, nil
+		}
+	}
+	recoveryData, recoveryExists, recoveryErr := readRegularFile(integrationStateRecoveryPath(cfg), 1<<20)
+	if recoveryErr != nil {
+		return integrationStateRepairResult{State: "unrecoverable"}, fmt.Errorf("read integration ownership recovery copy: %w", recoveryErr)
+	}
+	if !recoveryExists {
+		return integrationStateRepairResult{State: "unrecoverable"}, errors.New("integration ownership state is missing or corrupt and no recovery copy exists; restore the integrations/state.json file from backup before repair or uninstall")
+	}
+	if _, err := decodeIntegrationState(cfg, recoveryData); err != nil {
+		return integrationStateRepairResult{State: "unrecoverable"}, fmt.Errorf("integration ownership state and its recovery copy are invalid: %w", err)
+	}
+	if err := writePrivateFile(statePath, recoveryData); err != nil {
+		return integrationStateRepairResult{State: "unrecoverable"}, fmt.Errorf("restore integration ownership state: %w", err)
+	}
+	return integrationStateRepairResult{Changed: true, State: "recovered"}, nil
 }
 
 func repairPIDFile(cfg config.Config) (pidRepairResult, error) {
@@ -216,7 +432,10 @@ func repairPIDFile(cfg config.Config) (pidRepairResult, error) {
 		return pidRepairResult{State: "unknown"}, fmt.Errorf("inspect Layer Cache PID %d: %w", pid, err)
 	}
 	if alive {
-		return pidRepairResult{State: "process-alive-runtime-unverified"}, nil
+		return pidRepairResult{State: "process-alive-runtime-unverified"}, fmt.Errorf(
+			"Layer Cache PID %d is alive but its authenticated runtime is unavailable; resume or terminate that exact process before retrying repair",
+			pid,
+		)
 	}
 	if err := os.Remove(path); err != nil {
 		return pidRepairResult{State: "stale"}, fmt.Errorf("remove stale Layer Cache runtime ownership file: %w", err)
@@ -255,12 +474,12 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("load Layer Cache configuration: %w", err)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+cfg.Listen+"/v1/gc", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, localRuntimeURL(cfg.Listen)+"/v1/gc", nil)
 	if err != nil {
 		return fmt.Errorf("create garbage collection request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	response, err := newLocalCLIHTTPClient(5 * time.Second).Do(request)
 	if err != nil {
 		return fmt.Errorf("garbage collection requires a running runtime: %w", err)
 	}
@@ -280,7 +499,7 @@ func runGC(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	return printResult(stdout, *jsonOutput, result, "Layer Cache garbage collection complete")
 }
 
-func runBypass(args []string, stdout, stderr io.Writer) error {
+func runBypass(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defaultPath, err := config.DefaultPath()
 	if err != nil {
 		return err
@@ -294,15 +513,26 @@ func runBypass(args []string, stdout, stderr io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	if flags.NArg() != 0 {
+		return errors.New("bypass does not accept positional arguments")
+	}
 	if *adapter == "" && !*clearBypass {
 		return errors.New("--adapter is required (turbo, actions, buildkit, or all)")
 	}
 	if *adapter != "" && *adapter != "all" && !isSupportedAdapter(*adapter) {
 		return fmt.Errorf("unknown adapter %q", *adapter)
 	}
+	unlockConfiguration, err := lockConfiguration(ctx, *configPath)
+	if err != nil {
+		return err
+	}
+	defer unlockConfiguration()
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return fmt.Errorf("load Layer Cache configuration: %w", err)
+	}
+	if err := rejectConfigurationMutationWhileRuntimeActive(cfg); err != nil {
+		return fmt.Errorf("refusing to change bypass settings: %w", err)
 	}
 
 	active := make(map[string]bool, len(cfg.BypassAdapters))
@@ -330,6 +560,20 @@ func runBypass(args []string, stdout, stderr io.Writer) error {
 	return printResult(stdout, *jsonOutput, result, "Layer Cache bypass settings updated")
 }
 
+func runDisable(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	hasAdapter := false
+	for _, argument := range args {
+		if argument == "--adapter" || strings.HasPrefix(argument, "--adapter=") {
+			hasAdapter = true
+			break
+		}
+	}
+	if !hasAdapter {
+		args = append(append([]string(nil), args...), "--adapter", "all")
+	}
+	return runBypass(ctx, args, stdout, stderr)
+}
+
 func canonicalAdapters(active map[string]bool) []string {
 	result := make([]string, 0, len(active))
 	for _, name := range supportedAdapters {
@@ -355,10 +599,15 @@ func isAdapterBypassed(cfg config.Config, adapter string) bool {
 			return true
 		}
 	}
+	for _, name := range strings.Split(os.Getenv("LAYER_CACHE_BYPASS"), ",") {
+		if name == adapter || name == "all" {
+			return true
+		}
+	}
 	return false
 }
 
-func runUninstall(args []string, stdout, stderr io.Writer) error {
+func runUninstall(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defaultPath, err := config.DefaultPath()
 	if err != nil {
 		return err
@@ -383,6 +632,15 @@ func runUninstall(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("load Layer Cache configuration: %w", err)
 	}
+	unlockConfiguration, err := lockConfiguration(ctx, *configPath)
+	if err != nil {
+		return err
+	}
+	defer unlockConfiguration()
+	cfg, err = config.Load(*configPath)
+	if err != nil {
+		return fmt.Errorf("reload Layer Cache configuration after locking uninstall: %w", err)
+	}
 	if err := validateDeletionTarget(cfg.DataDir); err != nil {
 		return fmt.Errorf("refusing to uninstall from unsafe Local Cache directory: %w", err)
 	}
@@ -392,25 +650,51 @@ func runUninstall(args []string, stdout, stderr io.Writer) error {
 	if err := stopRuntimeForUninstall(cfg); err != nil {
 		return err
 	}
-
+	credentialRemoved := false
+	if cfg.GitHubCredentialAccount != "" {
+		if err := (credentials.Store{}).Delete(ctx, cfg.GitHubCredentialAccount); err != nil {
+			return fmt.Errorf("remove Layer Cache credential before filesystem cleanup: %w", err)
+		}
+		credentialRemoved = true
+	}
+	unlockIntegrations, err := lockIntegrationState(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer unlockIntegrations()
+	integrationCleanup, err := cleanupOwnedIntegrations(ctx, cfg, *preserveCache)
+	if err != nil {
+		return fmt.Errorf("clean up owned integration configuration: %w", err)
+	}
+	for _, item := range integrationCleanup.Left {
+		_, _ = fmt.Fprintf(stderr, "Layer Cache left %s untouched because ownership or content had changed; remove or restore it manually if desired\n", item)
+	}
 	if *deleteCache {
 		if err := os.RemoveAll(cfg.DataDir); err != nil {
 			return fmt.Errorf("delete configured Local Cache directory %s: %w", cfg.DataDir, err)
 		}
 	} else {
-		for _, path := range []string{pidPath(cfg), filepath.Join(cfg.DataDir, "daemon.log"), filepath.Join(cfg.DataDir, ownershipMarkerName)} {
+		for _, path := range []string{pidPath(cfg), filepath.Join(cfg.DataDir, "daemon.log")} {
 			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("remove owned runtime file %s: %w", path, err)
 			}
+		}
+		if err := removeIntegrationOwnershipMetadata(cfg); err != nil {
+			return fmt.Errorf("remove integration ownership metadata: %w", err)
+		}
+		if err := markPreservedCache(cfg, *configPath); err != nil {
+			return fmt.Errorf("mark preserved Local Cache ownership: %w", err)
 		}
 	}
 	if err := os.Remove(*configPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove Layer Cache configuration: %w", err)
 	}
 	result := map[string]any{
-		"uninstalled":    true,
-		"cachePreserved": *preserveCache,
-		"dataDir":        cfg.DataDir,
+		"uninstalled":       true,
+		"cachePreserved":    *preserveCache,
+		"dataDir":           cfg.DataDir,
+		"integrations":      integrationCleanup,
+		"credentialRemoved": credentialRemoved,
 	}
 	return printResult(stdout, *jsonOutput, result, "Layer Cache uninstalled")
 }
@@ -447,7 +731,13 @@ func stopRuntimeForUninstall(cfg config.Config) error {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := probeRuntime(cfg); err != nil {
-			return nil
+			alive, aliveErr := processAlive(ownership.PID)
+			if aliveErr != nil {
+				return fmt.Errorf("confirm Layer Cache runtime shutdown: %w", aliveErr)
+			}
+			if !alive {
+				return nil
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -552,10 +842,12 @@ func ensureOwnershipMarker(cfg config.Config, configPath string) error {
 		if jsonErr := json.Unmarshal(data, &existing); jsonErr != nil {
 			return fmt.Errorf("decode existing Local Cache ownership marker: %w", jsonErr)
 		}
-		if existing != marker {
+		if existing != marker && !(existing.Preserved && existing.ConfigPath == absoluteConfigPath) {
 			return errors.New("Local Cache directory is owned by a different Layer Cache installation")
 		}
-		return nil
+		if existing == marker {
+			return nil
+		}
 	} else if !errors.Is(readErr, fs.ErrNotExist) {
 		return fmt.Errorf("read Local Cache ownership marker: %w", readErr)
 	}
@@ -591,10 +883,32 @@ func ensureOwnershipMarker(cfg config.Config, configPath string) error {
 	return nil
 }
 
+func markPreservedCache(cfg config.Config, configPath string) error {
+	absoluteConfigPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("resolve configuration path: %w", err)
+	}
+	encoded, err := json.MarshalIndent(ownershipMarker{ConfigPath: absoluteConfigPath, Preserved: true}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode preserved-cache ownership marker: %w", err)
+	}
+	return writePrivateFile(filepath.Join(cfg.DataDir, ownershipMarkerName), append(encoded, '\n'))
+}
+
 func rejectOwnershipConflict(cfg config.Config, configPath string) error {
 	path := filepath.Join(cfg.DataDir, ownershipMarkerName)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
+		entries, readErr := os.ReadDir(cfg.DataDir)
+		if errors.Is(readErr, fs.ErrNotExist) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("inspect unowned Local Cache directory: %w", readErr)
+		}
+		if len(entries) != 0 {
+			return errors.New("refusing to claim a non-empty Local Cache directory without this installation's ownership marker; choose an empty directory or restore the marker from backup")
+		}
 		return nil
 	}
 	if err != nil {
@@ -609,6 +923,9 @@ func rejectOwnershipConflict(cfg config.Config, configPath string) error {
 		return fmt.Errorf("resolve configuration path: %w", err)
 	}
 	want := ownershipMarker{InstallationID: cfg.InstallationID, ConfigPath: absoluteConfigPath}
+	if marker.Preserved && marker.ConfigPath == absoluteConfigPath {
+		return nil
+	}
 	if marker != want {
 		return errors.New("Local Cache directory is owned by a different Layer Cache installation")
 	}

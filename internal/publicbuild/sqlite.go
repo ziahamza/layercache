@@ -31,7 +31,7 @@ func OpenSQLiteCoordinator(path string, config Config) (*SQLiteCoordinator, erro
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("Public Build database path is required")
 	}
-	allowlist, err := prepareConfig(config)
+	allowlist, err := prepareConfig(&config)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +70,7 @@ func (coordinator *SQLiteCoordinator) initialize(ctx context.Context) error {
 			target TEXT NOT NULL,
 			recipe_digest TEXT NOT NULL,
 			platform TEXT NOT NULL,
+			declared_inputs_json BLOB NOT NULL DEFAULT '[]',
 			cpu_millis INTEGER NOT NULL,
 			memory_bytes INTEGER NOT NULL,
 			disk_bytes INTEGER NOT NULL,
@@ -77,6 +78,8 @@ func (coordinator *SQLiteCoordinator) initialize(ctx context.Context) error {
 			state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
 			worker_id TEXT NOT NULL DEFAULT '',
 			lease_token_hash TEXT NOT NULL DEFAULT '',
+			lease_expires_at_ns INTEGER NOT NULL DEFAULT 0,
+			publication_token_hash TEXT NOT NULL DEFAULT '',
 			requested_at_ns INTEGER NOT NULL,
 			started_at_ns INTEGER NOT NULL DEFAULT 0,
 			finished_at_ns INTEGER NOT NULL DEFAULT 0,
@@ -111,6 +114,15 @@ func (coordinator *SQLiteCoordinator) initialize(ctx context.Context) error {
 			return fmt.Errorf("initialize Public Build database: %w", err)
 		}
 	}
+	for name, definition := range map[string]string{
+		"lease_expires_at_ns":    `INTEGER NOT NULL DEFAULT 0`,
+		"publication_token_hash": `TEXT NOT NULL DEFAULT ''`,
+		"declared_inputs_json":   `BLOB NOT NULL DEFAULT '[]'`,
+	} {
+		if err := ensureBuildColumn(ctx, coordinator.database, name, definition); err != nil {
+			return err
+		}
+	}
 
 	transaction, err := coordinator.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -119,12 +131,45 @@ func (coordinator *SQLiteCoordinator) initialize(ctx context.Context) error {
 	defer transaction.Rollback()
 	if _, err := transaction.ExecContext(ctx, `
 		UPDATE public_builds_v1
-		SET state = ?, worker_id = '', lease_token_hash = '', started_at_ns = 0
+		SET state = ?, worker_id = '', lease_token_hash = '', lease_expires_at_ns = 0,
+			publication_token_hash = '', started_at_ns = 0
 		WHERE state = ?`, StateQueued, StateRunning); err != nil {
 		return fmt.Errorf("recover interrupted Public Builds: %w", err)
 	}
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("commit Public Build recovery: %w", err)
+	}
+	return nil
+}
+
+func ensureBuildColumn(ctx context.Context, database *sql.DB, name, definition string) error {
+	rows, err := database.QueryContext(ctx, `PRAGMA table_info(public_builds_v1)`)
+	if err != nil {
+		return fmt.Errorf("inspect Public Build database schema: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var column, columnType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := rows.Scan(&cid, &column, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("inspect Public Build database column: %w", err)
+		}
+		if column == name {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close Public Build database schema: %w", err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := database.ExecContext(ctx, `ALTER TABLE public_builds_v1 ADD COLUMN `+name+` `+definition); err != nil {
+		return fmt.Errorf("add Public Build database column %s: %w", name, err)
 	}
 	return nil
 }
@@ -141,23 +186,55 @@ func (coordinator *SQLiteCoordinator) Request(ctx context.Context, request Build
 	if err := ctx.Err(); err != nil {
 		return RequestResult{}, err
 	}
-	normalized, err := admit(request, coordinator.allowlist, coordinator.config.Limits)
+	normalized, err := admit(ctx, request, coordinator.allowlist, coordinator.config)
 	if err != nil {
 		return RequestResult{}, err
 	}
+	publicationMissing := false
+	publicationUnavailable := false
+	if coordinator.config.Publications != nil {
+		existing, lookupErr := coordinator.config.Publications.Find(ctx, normalized)
+		if lookupErr == nil {
+			build, err := buildFromExistingPublication(normalized, existing, coordinator.config.Now().UTC())
+			if err != nil {
+				return RequestResult{}, err
+			}
+			return RequestResult{Build: build, Reused: true}, nil
+		}
+		if !errors.Is(lookupErr, ErrPublicationNotFound) {
+			return RequestResult{}, fmt.Errorf("find existing Public Cache publication: %w", lookupErr)
+		}
+		publicationMissing = true
+		publicationUnavailable = errors.Is(lookupErr, ErrPublicationUnavailable)
+	}
 	identity := durableBuildIdentity(normalized)
-	now := time.Now().UTC()
+	encodedInputs, err := encodeDeclaredInputs(normalized.Inputs)
+	if err != nil {
+		return RequestResult{}, err
+	}
+	now := coordinator.config.Now().UTC()
 
 	transaction, err := coordinator.database.BeginTx(ctx, nil)
 	if err != nil {
 		return RequestResult{}, fmt.Errorf("begin Public Build request: %w", err)
 	}
 	defer transaction.Rollback()
+	if publicationMissing {
+		if _, err := transaction.ExecContext(ctx, `
+			UPDATE public_builds_v1
+			SET state = ?, publication_token_hash = '', failure = ?
+			WHERE identity = ? AND state = ? AND (? OR finished_at_ns <= ?)`,
+			StateFailed, "Public Cache publication is unavailable", identity, StateSucceeded,
+			publicationUnavailable, now.Add(-publicationRegistrationGrace).UnixNano(),
+		); err != nil {
+			return RequestResult{}, fmt.Errorf("retire unavailable Public Build publication: %w", err)
+		}
+	}
 	result, err := transaction.ExecContext(ctx, `
 		INSERT OR IGNORE INTO public_builds_v1 (
-			identity, repository, commit_digest, integration, target, recipe_digest, platform,
+			identity, repository, commit_digest, integration, target, recipe_digest, platform, declared_inputs_json,
 			cpu_millis, memory_bytes, disk_bytes, timeout_ns, state, requested_at_ns
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		identity,
 		normalized.Repository,
 		normalized.Commit,
@@ -165,6 +242,7 @@ func (coordinator *SQLiteCoordinator) Request(ctx context.Context, request Build
 		normalized.Target,
 		normalized.RecipeDigest,
 		normalized.Platform,
+		encodedInputs,
 		normalized.Resources.CPUMillis,
 		normalized.Resources.MemoryBytes,
 		normalized.Resources.DiskBytes,
@@ -201,6 +279,9 @@ func (coordinator *SQLiteCoordinator) Request(ctx context.Context, request Build
 	build, err := loadSQLiteBuild(ctx, transaction, sequence)
 	if err != nil {
 		return RequestResult{}, err
+	}
+	if publicationMissing && build.State == StateSucceeded {
+		return RequestResult{}, ErrPublicationPending
 	}
 	if err := transaction.Commit(); err != nil {
 		return RequestResult{}, fmt.Errorf("commit Public Build request: %w", err)
@@ -277,23 +358,42 @@ func (coordinator *SQLiteCoordinator) LeaseNext(ctx context.Context, worker Work
 		return Lease{}, reject("worker ID is required")
 	}
 	capabilities := worker.Capabilities()
-	if len(capabilities.Integrations) == 0 || len(capabilities.Platforms) == 0 {
+	if (len(capabilities.Recipes) == 0 && len(capabilities.Integrations) == 0) || len(capabilities.Platforms) == 0 {
 		return Lease{}, ErrNoWork
 	}
 	token, err := newLeaseToken()
 	if err != nil {
 		return Lease{}, err
 	}
-	now := time.Now().UTC()
+	now := coordinator.config.Now().UTC()
+	expiresAt := now.Add(coordinator.config.LeaseDuration)
 
 	transaction, err := coordinator.database.BeginTx(ctx, nil)
 	if err != nil {
 		return Lease{}, fmt.Errorf("begin Public Build lease: %w", err)
 	}
 	defer transaction.Rollback()
-	arguments := []any{StateRunning, workerID, hashLeaseToken(token), now.UnixNano(), StateQueued}
-	for _, integration := range capabilities.Integrations {
-		arguments = append(arguments, integration)
+	if err := coordinator.requeueExpired(ctx, transaction, now); err != nil {
+		return Lease{}, err
+	}
+	arguments := []any{StateRunning, workerID, hashLeaseToken(token), now.UnixNano(), expiresAt.UnixNano(), StateQueued}
+	recipePredicate := "integration IN (" + placeholders(len(capabilities.Integrations)) + ")"
+	if len(capabilities.Recipes) > 0 {
+		predicates := make([]string, 0, len(capabilities.Recipes))
+		for _, recipe := range capabilities.Recipes {
+			if recipe.Target == "*" {
+				predicates = append(predicates, "(integration = ? AND recipe_digest = ?)")
+				arguments = append(arguments, recipe.Integration, recipe.RecipeDigest)
+				continue
+			}
+			predicates = append(predicates, "(integration = ? AND target = ? AND recipe_digest = ?)")
+			arguments = append(arguments, recipe.Integration, recipe.Target, recipe.RecipeDigest)
+		}
+		recipePredicate = "(" + strings.Join(predicates, " OR ") + ")"
+	} else {
+		for _, integration := range capabilities.Integrations {
+			arguments = append(arguments, integration)
+		}
 	}
 	for _, platform := range capabilities.Platforms {
 		arguments = append(arguments, platform)
@@ -301,13 +401,13 @@ func (coordinator *SQLiteCoordinator) LeaseNext(ctx context.Context, worker Work
 	arguments = append(arguments, StateQueued)
 	claim := fmt.Sprintf(`
 		UPDATE public_builds_v1
-		SET state = ?, worker_id = ?, lease_token_hash = ?, started_at_ns = ?
+		SET state = ?, worker_id = ?, lease_token_hash = ?, started_at_ns = ?, lease_expires_at_ns = ?
 		WHERE sequence = (
 			SELECT sequence FROM public_builds_v1
-			WHERE state = ? AND integration IN (%s) AND platform IN (%s)
+			WHERE state = ? AND %s AND platform IN (%s)
 			ORDER BY sequence LIMIT 1
 		) AND state = ?
-		RETURNING sequence`, placeholders(len(capabilities.Integrations)), placeholders(len(capabilities.Platforms)))
+		RETURNING sequence`, recipePredicate, placeholders(len(capabilities.Platforms)))
 	var selected int64
 	if err := transaction.QueryRowContext(ctx, claim, arguments...).Scan(&selected); errors.Is(err, sql.ErrNoRows) {
 		return Lease{}, ErrNoWork
@@ -321,14 +421,64 @@ func (coordinator *SQLiteCoordinator) LeaseNext(ctx context.Context, worker Work
 	if err := transaction.Commit(); err != nil {
 		return Lease{}, fmt.Errorf("commit Public Build lease: %w", err)
 	}
-	return Lease{Token: token, WorkerID: workerID, Build: build, LeasedAt: now}, nil
+	return Lease{Token: token, WorkerID: workerID, Build: build, LeasedAt: now, ExpiresAt: expiresAt}, nil
+}
+
+func (coordinator *SQLiteCoordinator) requeueExpired(ctx context.Context, transaction *sql.Tx, now time.Time) error {
+	if _, err := transaction.ExecContext(ctx, `
+		UPDATE public_builds_v1
+		SET state = ?, worker_id = '', lease_token_hash = '', lease_expires_at_ns = 0,
+			publication_token_hash = '', started_at_ns = 0
+		WHERE state = ? AND lease_expires_at_ns <= ?`, StateQueued, StateRunning, now.UnixNano()); err != nil {
+		return fmt.Errorf("recover expired Public Build leases: %w", err)
+	}
+	return nil
+}
+
+func (coordinator *SQLiteCoordinator) Renew(ctx context.Context, lease Lease) (Lease, error) {
+	if err := ctx.Err(); err != nil {
+		return Lease{}, err
+	}
+	sequence, err := parseBuildID(lease.Build.ID)
+	if err != nil {
+		return Lease{}, ErrNotFound
+	}
+	now := coordinator.config.Now().UTC()
+	expiresAt := now.Add(coordinator.config.LeaseDuration)
+	transaction, err := coordinator.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Lease{}, fmt.Errorf("begin Public Build lease renewal: %w", err)
+	}
+	defer transaction.Rollback()
+	var renewed int64
+	err = transaction.QueryRowContext(ctx, `
+		UPDATE public_builds_v1 SET lease_expires_at_ns = ?
+		WHERE sequence = ? AND state = ? AND worker_id = ? AND lease_token_hash = ?
+			AND lease_expires_at_ns > ? AND publication_token_hash = ''
+		RETURNING sequence`, expiresAt.UnixNano(), sequence, StateRunning, lease.WorkerID,
+		hashLeaseToken(lease.Token), now.UnixNano()).Scan(&renewed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Lease{}, sqliteLeaseError(ctx, transaction, sequence)
+	}
+	if err != nil {
+		return Lease{}, fmt.Errorf("renew Public Build lease: %w", err)
+	}
+	build, err := loadSQLiteBuild(ctx, transaction, renewed)
+	if err != nil {
+		return Lease{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Lease{}, fmt.Errorf("commit Public Build lease renewal: %w", err)
+	}
+	return Lease{Token: lease.Token, WorkerID: lease.WorkerID, Build: build, LeasedAt: now, ExpiresAt: expiresAt}, nil
 }
 
 func (coordinator *SQLiteCoordinator) AppendLog(ctx context.Context, lease Lease, message string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	sanitized := coordinator.config.SanitizeLog(message)
+	sanitized := sanitizePublicBuildLog(coordinator.config, message, lease.Token)
+	now := coordinator.config.Now().UTC()
 	transaction, err := coordinator.database.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin Public Build log append: %w", err)
@@ -346,8 +496,10 @@ func (coordinator *SQLiteCoordinator) AppendLog(ctx context.Context, lease Lease
 			?, ?
 		FROM public_builds_v1 AS build
 		WHERE build.sequence = ? AND build.state = ? AND build.worker_id = ? AND build.lease_token_hash = ?
+			AND build.lease_expires_at_ns > ? AND build.publication_token_hash = ''
 		RETURNING sequence`,
-		time.Now().UTC().UnixNano(), sanitized, sequence, StateRunning, lease.WorkerID, hashLeaseToken(lease.Token)).Scan(&logSequence)
+		now.UnixNano(), sanitized, sequence, StateRunning, lease.WorkerID,
+		hashLeaseToken(lease.Token), now.UnixNano()).Scan(&logSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sqliteLeaseError(ctx, transaction, sequence)
 	}
@@ -364,10 +516,11 @@ func (coordinator *SQLiteCoordinator) Complete(ctx context.Context, lease Lease,
 	if err := ctx.Err(); err != nil {
 		return Build{}, err
 	}
-	if err := validatePublication(publication); err != nil {
+	if err := validateCredentialFreePublication(publication, lease.Token); err != nil {
 		return Build{}, reject(err.Error())
 	}
 	publication = clonePublication(publication)
+	now := coordinator.config.Now().UTC()
 	transaction, err := coordinator.database.BeginTx(ctx, nil)
 	if err != nil {
 		return Build{}, fmt.Errorf("begin Public Build completion: %w", err)
@@ -379,16 +532,18 @@ func (coordinator *SQLiteCoordinator) Complete(ctx context.Context, lease Lease,
 	}
 	err = transaction.QueryRowContext(ctx, `
 		UPDATE public_builds_v1
-		SET state = ?, finished_at_ns = ?, producer_duration_ns = ?, lease_token_hash = ''
+		SET state = ?, finished_at_ns = ?, producer_duration_ns = ?, lease_token_hash = '', lease_expires_at_ns = 0
 		WHERE sequence = ? AND state = ? AND worker_id = ? AND lease_token_hash = ?
+			AND lease_expires_at_ns > ? AND publication_token_hash = ''
 		RETURNING sequence`,
 		StateSucceeded,
-		time.Now().UTC().UnixNano(),
+		now.UnixNano(),
 		int64(publication.ProducerDuration),
 		sequence,
 		StateRunning,
 		lease.WorkerID,
 		hashLeaseToken(lease.Token),
+		now.UnixNano(),
 	).Scan(&sequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Build{}, sqliteLeaseError(ctx, transaction, sequence)
@@ -396,14 +551,8 @@ func (coordinator *SQLiteCoordinator) Complete(ctx context.Context, lease Lease,
 	if err != nil {
 		return Build{}, fmt.Errorf("complete Public Build: %w", err)
 	}
-	for ordinal, output := range publication.Outputs {
-		if _, err := transaction.ExecContext(ctx, `
-			INSERT INTO public_build_outputs_v1 (
-				build_sequence, ordinal, name, digest, size_bytes, media_type
-			) VALUES (?, ?, ?, ?, ?, ?)`,
-			sequence, ordinal, output.Name, output.Digest, output.SizeBytes, output.MediaType); err != nil {
-			return Build{}, fmt.Errorf("stage Public Build publication: %w", err)
-		}
+	if err := insertSQLiteOutputs(ctx, transaction, sequence, publication.Outputs); err != nil {
+		return Build{}, err
 	}
 	build, err := loadSQLiteBuild(ctx, transaction, sequence)
 	if err != nil {
@@ -415,6 +564,164 @@ func (coordinator *SQLiteCoordinator) Complete(ctx context.Context, lease Lease,
 	return build, nil
 }
 
+func insertSQLiteOutputs(ctx context.Context, transaction *sql.Tx, sequence int64, outputs []OutputDescriptor) error {
+	for ordinal, output := range outputs {
+		if _, err := transaction.ExecContext(ctx, `
+			INSERT INTO public_build_outputs_v1 (
+				build_sequence, ordinal, name, digest, size_bytes, media_type
+			) VALUES (?, ?, ?, ?, ?, ?)`,
+			sequence, ordinal, output.Name, output.Digest, output.SizeBytes, output.MediaType); err != nil {
+			return fmt.Errorf("stage Public Build publication: %w", err)
+		}
+	}
+	return nil
+}
+
+func (coordinator *SQLiteCoordinator) BeginLeasedPublication(
+	ctx context.Context,
+	lease Lease,
+) (PublicationPermit, error) {
+	if err := ctx.Err(); err != nil {
+		return PublicationPermit{}, err
+	}
+	sequence, err := parseBuildID(lease.Build.ID)
+	if err != nil {
+		return PublicationPermit{}, ErrNotFound
+	}
+	if lease.Token == "" || lease.WorkerID == "" {
+		return PublicationPermit{}, ErrPublicationLost
+	}
+	token, err := newLeaseToken()
+	if err != nil {
+		return PublicationPermit{}, err
+	}
+	now := coordinator.config.Now().UTC()
+	transaction, err := coordinator.database.BeginTx(ctx, nil)
+	if err != nil {
+		return PublicationPermit{}, fmt.Errorf("begin leased Public Build publication: %w", err)
+	}
+	defer transaction.Rollback()
+	var selected int64
+	err = transaction.QueryRowContext(ctx, `
+		UPDATE public_builds_v1
+		SET publication_token_hash = ?, lease_expires_at_ns = ?
+		WHERE sequence = ? AND state = ? AND worker_id = ? AND lease_token_hash = ?
+			AND lease_expires_at_ns > ? AND publication_token_hash = ''
+		RETURNING sequence`, hashLeaseToken(token), now.Add(coordinator.config.PublicationDuration).UnixNano(),
+		sequence, StateRunning, lease.WorkerID, hashLeaseToken(lease.Token), now.UnixNano()).Scan(&selected)
+	if errors.Is(err, sql.ErrNoRows) {
+		publicationErr := sqlitePublicationError(ctx, transaction, sequence)
+		if errors.Is(publicationErr, ErrNotFound) {
+			return PublicationPermit{}, publicationErr
+		}
+		return PublicationPermit{}, ErrPublicationLost
+	}
+	if err != nil {
+		return PublicationPermit{}, fmt.Errorf("claim leased Public Build publication: %w", err)
+	}
+	build, err := loadSQLiteBuild(ctx, transaction, selected)
+	if err != nil {
+		return PublicationPermit{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return PublicationPermit{}, fmt.Errorf("commit leased Public Build publication claim: %w", err)
+	}
+	return PublicationPermit{Token: token, Build: build}, nil
+}
+
+func (coordinator *SQLiteCoordinator) CommitPublication(
+	ctx context.Context,
+	permit PublicationPermit,
+	publication Publication,
+) (Build, error) {
+	if err := ctx.Err(); err != nil {
+		return Build{}, err
+	}
+	if err := validateCredentialFreePublication(publication, permit.Token); err != nil {
+		return Build{}, reject(err.Error())
+	}
+	sequence, err := parseBuildID(permit.Build.ID)
+	if err != nil {
+		return Build{}, ErrNotFound
+	}
+	now := coordinator.config.Now().UTC()
+	transaction, err := coordinator.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Build{}, fmt.Errorf("begin trusted Public Build publication: %w", err)
+	}
+	defer transaction.Rollback()
+	err = transaction.QueryRowContext(ctx, `
+		UPDATE public_builds_v1
+		SET state = ?, finished_at_ns = ?, producer_duration_ns = ?, lease_token_hash = '',
+			lease_expires_at_ns = 0, publication_token_hash = ''
+		WHERE sequence = ? AND state = ? AND publication_token_hash = ? AND lease_expires_at_ns > ?
+		RETURNING sequence`, StateSucceeded, now.UnixNano(),
+		int64(publication.ProducerDuration), sequence, StateRunning, hashLeaseToken(permit.Token),
+		now.UnixNano()).Scan(&sequence)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Build{}, sqlitePublicationError(ctx, transaction, sequence)
+	}
+	if err != nil {
+		return Build{}, fmt.Errorf("commit trusted Public Build publication state: %w", err)
+	}
+	if err := insertSQLiteOutputs(ctx, transaction, sequence, publication.Outputs); err != nil {
+		return Build{}, err
+	}
+	build, err := loadSQLiteBuild(ctx, transaction, sequence)
+	if err != nil {
+		return Build{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Build{}, fmt.Errorf("commit trusted Public Build publication: %w", err)
+	}
+	return build, nil
+}
+
+func (coordinator *SQLiteCoordinator) AbortPublication(
+	ctx context.Context,
+	permit PublicationPermit,
+	reason string,
+) (Build, error) {
+	if err := ctx.Err(); err != nil {
+		return Build{}, err
+	}
+	if strings.TrimSpace(reason) == "" {
+		return Build{}, reject("publication failure reason is required")
+	}
+	sequence, err := parseBuildID(permit.Build.ID)
+	if err != nil {
+		return Build{}, ErrNotFound
+	}
+	now := coordinator.config.Now().UTC()
+	transaction, err := coordinator.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Build{}, fmt.Errorf("begin Public Build publication failure: %w", err)
+	}
+	defer transaction.Rollback()
+	err = transaction.QueryRowContext(ctx, `
+		UPDATE public_builds_v1
+		SET state = ?, finished_at_ns = ?, failure = ?, lease_token_hash = '',
+			lease_expires_at_ns = 0, publication_token_hash = ''
+		WHERE sequence = ? AND state = ? AND publication_token_hash = ? AND lease_expires_at_ns > ?
+		RETURNING sequence`, StateFailed, now.UnixNano(),
+		sanitizePublicBuildLog(coordinator.config, reason, permit.Token), sequence, StateRunning, hashLeaseToken(permit.Token),
+		now.UnixNano()).Scan(&sequence)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Build{}, sqlitePublicationError(ctx, transaction, sequence)
+	}
+	if err != nil {
+		return Build{}, fmt.Errorf("fail Public Build publication: %w", err)
+	}
+	build, err := loadSQLiteBuild(ctx, transaction, sequence)
+	if err != nil {
+		return Build{}, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return Build{}, fmt.Errorf("commit Public Build publication failure: %w", err)
+	}
+	return build, nil
+}
+
 func (coordinator *SQLiteCoordinator) Fail(ctx context.Context, lease Lease, reason string) (Build, error) {
 	if err := ctx.Err(); err != nil {
 		return Build{}, err
@@ -422,7 +729,8 @@ func (coordinator *SQLiteCoordinator) Fail(ctx context.Context, lease Lease, rea
 	if strings.TrimSpace(reason) == "" {
 		return Build{}, reject("failure reason is required")
 	}
-	sanitized := coordinator.config.SanitizeLog(reason)
+	sanitized := sanitizePublicBuildLog(coordinator.config, reason, lease.Token)
+	now := coordinator.config.Now().UTC()
 	transaction, err := coordinator.database.BeginTx(ctx, nil)
 	if err != nil {
 		return Build{}, fmt.Errorf("begin Public Build failure: %w", err)
@@ -434,16 +742,18 @@ func (coordinator *SQLiteCoordinator) Fail(ctx context.Context, lease Lease, rea
 	}
 	err = transaction.QueryRowContext(ctx, `
 		UPDATE public_builds_v1
-		SET state = ?, finished_at_ns = ?, failure = ?, lease_token_hash = ''
+		SET state = ?, finished_at_ns = ?, failure = ?, lease_token_hash = '', lease_expires_at_ns = 0
 		WHERE sequence = ? AND state = ? AND worker_id = ? AND lease_token_hash = ?
+			AND lease_expires_at_ns > ? AND publication_token_hash = ''
 		RETURNING sequence`,
 		StateFailed,
-		time.Now().UTC().UnixNano(),
+		now.UnixNano(),
 		sanitized,
 		sequence,
 		StateRunning,
 		lease.WorkerID,
 		hashLeaseToken(lease.Token),
+		now.UnixNano(),
 	).Scan(&sequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Build{}, sqliteLeaseError(ctx, transaction, sequence)
@@ -477,10 +787,10 @@ func (coordinator *SQLiteCoordinator) Cancel(ctx context.Context, id string) (Bu
 	var cancelledSequence int64
 	err = transaction.QueryRowContext(ctx, `
 		UPDATE public_builds_v1
-		SET state = ?, finished_at_ns = ?, lease_token_hash = ''
-		WHERE sequence = ? AND state IN (?, ?)
+		SET state = ?, finished_at_ns = ?, lease_token_hash = '', lease_expires_at_ns = 0
+		WHERE sequence = ? AND state IN (?, ?) AND publication_token_hash = ''
 		RETURNING sequence`,
-		StateCancelled, time.Now().UTC().UnixNano(), sequence, StateQueued, StateRunning).Scan(&cancelledSequence)
+		StateCancelled, coordinator.config.Now().UTC().UnixNano(), sequence, StateQueued, StateRunning).Scan(&cancelledSequence)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Build{}, fmt.Errorf("cancel Public Build: %w", err)
 	}
@@ -506,7 +816,7 @@ type sqliteQueryer interface {
 }
 
 const sqliteBuildSelect = `
-	SELECT sequence, repository, commit_digest, integration, target, recipe_digest, platform,
+	SELECT sequence, repository, commit_digest, integration, target, recipe_digest, platform, declared_inputs_json,
 		cpu_millis, memory_bytes, disk_bytes, timeout_ns, state, worker_id,
 		requested_at_ns, started_at_ns, finished_at_ns, producer_duration_ns, failure
 	FROM public_builds_v1 WHERE sequence = ?`
@@ -515,6 +825,7 @@ func loadSQLiteBuild(ctx context.Context, queryer sqliteQueryer, sequence int64)
 	var storedSequence int64
 	var integration string
 	var platform string
+	var encodedInputs []byte
 	var timeout int64
 	var state string
 	var requestedAt int64
@@ -530,6 +841,7 @@ func loadSQLiteBuild(ctx context.Context, queryer sqliteQueryer, sequence int64)
 		&build.Request.Target,
 		&build.Request.RecipeDigest,
 		&platform,
+		&encodedInputs,
 		&build.Request.Resources.CPUMillis,
 		&build.Request.Resources.MemoryBytes,
 		&build.Request.Resources.DiskBytes,
@@ -547,6 +859,11 @@ func loadSQLiteBuild(ctx context.Context, queryer sqliteQueryer, sequence int64)
 	build.ID = formatBuildID(storedSequence)
 	build.Request.Integration = Integration(integration)
 	build.Request.Platform = Platform(platform)
+	inputs, err := decodeDeclaredInputs(encodedInputs)
+	if err != nil {
+		return Build{}, err
+	}
+	build.Request.Inputs = inputs
 	build.Request.Resources.Timeout = time.Duration(timeout)
 	build.State = State(state)
 	build.RequestedAt = timeFromUnixNano(requestedAt)
@@ -596,6 +913,18 @@ func sqliteLeaseError(ctx context.Context, transaction *sql.Tx, sequence int64) 
 		return ErrNotFound
 	}
 	return ErrLeaseLost
+}
+
+func sqlitePublicationError(ctx context.Context, transaction *sql.Tx, sequence int64) error {
+	var exists bool
+	if err := transaction.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM public_builds_v1 WHERE sequence = ?)`, sequence).Scan(&exists); err != nil {
+		return fmt.Errorf("check Public Build publication permit: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return ErrPublicationLost
 }
 
 func durableBuildIdentity(request BuildRequest) string {

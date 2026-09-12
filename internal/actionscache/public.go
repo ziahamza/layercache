@@ -1,6 +1,9 @@
 package actionscache
 
 import (
+	"archive/tar"
+	"bufio"
+	"compress/gzip"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -11,23 +14,26 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/layercache/layercache/internal/artifact"
 	"github.com/layercache/layercache/internal/publictrust"
 )
 
 const actionsPublicIdentityVersion = "layercache/actions-cache/public-identity/v1"
+const legacyTarRegularFile byte = 0
 
 // PublicResolveRequest is the exact, server-owned coordinate a Public Cache
 // resolver must resolve. Identity is the publictrust identity derived from
 // Expected; the remaining fields let an HTTP adapter send an auditable request
 // without reconstructing cache authority from client input.
 type PublicResolveRequest struct {
-	Identity         string               `json:"identity"`
+	CacheIdentity    string               `json:"cacheIdentity"`
 	Expected         publictrust.Expected `json:"expected"`
 	Repository       string               `json:"repository"`
 	SourceRepository string               `json:"sourceRepository"`
@@ -35,20 +41,27 @@ type PublicResolveRequest struct {
 	Key              string               `json:"key"`
 	Version          string               `json:"version"`
 	Compatibility    string               `json:"compatibility"`
+	SourceCommit     string               `json:"sourceCommit"`
+	RecipeDigest     string               `json:"recipeDigest"`
+	Target           string               `json:"target"`
+	Platform         string               `json:"platform"`
+	Toolchain        string               `json:"toolchain"`
+	Builder          string               `json:"builder"`
 }
 
 // PublicEntryMetadata is the signed trust record persisted beside an archive
 // warmed into Local Cache. ExpiresAt, Digest, and Size are derived from the
 // verified envelope and checked against it again before offline use.
 type PublicEntryMetadata struct {
-	Request   PublicResolveRequest `json:"request"`
-	Envelope  publictrust.Envelope `json:"envelope"`
-	Digest    string               `json:"digest"`
-	Size      int64                `json:"size"`
-	ExpiresAt time.Time            `json:"expiresAt"`
+	Request        PublicResolveRequest `json:"request"`
+	Envelope       publictrust.Envelope `json:"envelope"`
+	Digest         string               `json:"digest"`
+	Size           int64                `json:"size"`
+	ExpiresAt      time.Time            `json:"expiresAt"`
+	PublicIdentity string               `json:"publicIdentity"`
 }
 
-// PublicResolution contains untrusted input. PublicStorage verifies the DSSE
+// PublicResolution contains untrusted input. PublicCacheIndex verifies the DSSE
 // envelope and every archive byte before making the result observable.
 type PublicResolution struct {
 	Envelope publictrust.Envelope
@@ -57,14 +70,14 @@ type PublicResolution struct {
 
 // PublicResolver obtains one signed publication and its archive. A resolver
 // should return publictrust.ErrNotFound, ErrRevoked, or ErrAmbiguous for an
-// unusable exact identity; PublicStorage will then try the next ordered exact
+// unusable exact identity; PublicCacheIndex will then try the next ordered exact
 // coordinate.
 type PublicResolver interface {
 	Resolve(context.Context, PublicResolveRequest) (PublicResolution, error)
 	Revalidate(context.Context, PublicResolveRequest) (publictrust.Envelope, error)
 }
 
-type PublicStorageConfig struct {
+type PublicCacheConfig struct {
 	VerificationKey  ed25519.PublicKey
 	StagingDirectory string
 	// ArtifactStore accounts verified downloads against the same transient
@@ -75,20 +88,27 @@ type PublicStorageConfig struct {
 	// Build provenance. When empty, owner/repo Actions namespaces are safely
 	// derived as https://github.com/owner/repo. Set it explicitly for GHES.
 	SourceRepository string
-	Now              func() time.Time
+	// RequireSafeArchive rejects archives whose members can escape the Actions
+	// workspace or whose links can redirect later extraction through another
+	// archive member. Production Actions adapters must enable it.
+	RequireSafeArchive bool
+	Now                func() time.Time
 }
 
-// PublicStorage is a read-only Actions v1 StorageIndex. It intentionally
-// supports exact identities only: current ref then default ref, and within a
-// ref, keys in caller order. It never interprets or extracts archive bytes.
-type PublicStorage struct {
-	resolver         PublicResolver
-	verificationKey  ed25519.PublicKey
-	now              func() time.Time
-	stagingRoot      string
-	sourceRepository string
-	artifacts        *artifact.Store
-	maxArtifactBytes int64
+// PublicCacheIndex is a read-only Actions v1 cache index. It intentionally
+// supports exact identities only: the primary key on the current ref. Public
+// fallback cannot verify a default-branch commit against the current workflow
+// identity. Restore-key, prefix, and default-ref matching remain private Local
+// and Team Cache behavior. It never extracts archive bytes.
+type PublicCacheIndex struct {
+	resolver           PublicResolver
+	verificationKey    ed25519.PublicKey
+	now                func() time.Time
+	stagingRoot        string
+	sourceRepository   string
+	artifacts          *artifact.Store
+	maxArtifactBytes   int64
+	requireSafeArchive bool
 
 	mu         sync.Mutex
 	nextID     int64
@@ -115,7 +135,7 @@ type publicResolveCall struct {
 	err     error
 }
 
-func NewPublicStorage(config PublicStorageConfig, resolver PublicResolver) (*PublicStorage, error) {
+func NewPublicCacheIndex(config PublicCacheConfig, resolver PublicResolver) (*PublicCacheIndex, error) {
 	if resolver == nil {
 		return nil, errors.New("Public Cache resolver is required")
 	}
@@ -154,16 +174,17 @@ func NewPublicStorage(config PublicStorageConfig, resolver PublicResolver) (*Pub
 	if err != nil {
 		return nil, fmt.Errorf("create Public Cache archive staging directory: %w", err)
 	}
-	return &PublicStorage{
+	return &PublicCacheIndex{
 		resolver: resolver, verificationKey: append(ed25519.PublicKey(nil), config.VerificationKey...),
 		now: config.Now, stagingRoot: root, sourceRepository: sourceRepository,
 		artifacts: config.ArtifactStore, maxArtifactBytes: maxArtifactBytes,
-		byIdentity: make(map[string]*verifiedPublicArchive),
-		byID:       make(map[int64]*verifiedPublicArchive), inflight: make(map[string]*publicResolveCall),
+		requireSafeArchive: config.RequireSafeArchive,
+		byIdentity:         make(map[string]*verifiedPublicArchive),
+		byID:               make(map[int64]*verifiedPublicArchive), inflight: make(map[string]*publicResolveCall),
 	}, nil
 }
 
-func (storage *PublicStorage) Close() error {
+func (storage *PublicCacheIndex) Close() error {
 	storage.mu.Lock()
 	if storage.closed {
 		storage.mu.Unlock()
@@ -187,7 +208,10 @@ func (storage *PublicStorage) Close() error {
 	return err
 }
 
-func (storage *PublicStorage) Lookup(ctx context.Context, request LookupRequest) (LookupResult, error) {
+func (storage *PublicCacheIndex) Lookup(ctx context.Context, request LookupRequest) (LookupResult, error) {
+	if !request.Scope.hasCompletePublicIdentity() {
+		return LookupResult{}, ErrNotFound
+	}
 	sourceRepository, err := storage.sourceRepositoryFor(request.Scope.Repository)
 	if err != nil {
 		// A non-GitHub.com namespace requires an explicit server-owned source URL.
@@ -198,44 +222,28 @@ func (storage *PublicStorage) Lookup(ctx context.Context, request LookupRequest)
 		value string
 		scope RefScope
 	}{{value: request.Scope.Ref, scope: RefScopeCurrent}}
-	if request.Scope.DefaultRef != request.Scope.Ref {
-		refs = append(refs, struct {
-			value string
-			scope RefScope
-		}{value: request.Scope.DefaultRef, scope: RefScopeDefault})
+	if len(request.Keys) == 0 {
+		return LookupResult{}, ErrNotFound
 	}
+	primaryKey := request.Keys[0]
 	for _, ref := range refs {
-		for _, key := range request.Keys {
-			resolveRequest := newPublicResolveRequest(request.Scope, sourceRepository, ref.value, key, request.Version)
-			archive, err := storage.resolveOnce(ctx, resolveRequest)
-			if err != nil {
-				if isUnavailablePublicIdentity(err) {
-					continue
-				}
-				return LookupResult{}, err
+		resolveRequest := newPublicResolveRequest(request.Scope, sourceRepository, ref.value, primaryKey, request.Version)
+		archive, err := storage.resolveOnce(ctx, resolveRequest)
+		if err != nil {
+			if isUnavailablePublicIdentity(err) {
+				continue
 			}
-			return LookupResult{
-				Entry: cloneEntry(archive.entry), Match: MatchExact, RequestedKey: key,
-				RefScope: ref.scope, Source: SourcePublicCache,
-			}, nil
+			return LookupResult{}, err
 		}
+		return LookupResult{
+			Entry: cloneEntry(archive.entry), Match: MatchExact, RequestedKey: primaryKey,
+			RefScope: ref.scope, Source: SourcePublicCache,
+		}, nil
 	}
 	return LookupResult{}, ErrNotFound
 }
 
-func (storage *PublicStorage) Reserve(context.Context, ReserveRequest) (Reservation, error) {
-	return Reservation{}, ErrReadOnly
-}
-
-func (storage *PublicStorage) Upload(context.Context, UploadRequest) error {
-	return ErrReadOnly
-}
-
-func (storage *PublicStorage) Commit(context.Context, CommitRequest) (Entry, error) {
-	return Entry{}, ErrReadOnly
-}
-
-func (storage *PublicStorage) Open(_ context.Context, request OpenRequest) (Archive, error) {
+func (storage *PublicCacheIndex) Open(_ context.Context, request OpenRequest) (Archive, error) {
 	storage.mu.Lock()
 	archive := storage.byID[request.ID]
 	closed := storage.closed
@@ -255,20 +263,20 @@ func (storage *PublicStorage) Open(_ context.Context, request OpenRequest) (Arch
 	return Archive{Entry: cloneEntry(archive.entry), Body: body}, nil
 }
 
-func (storage *PublicStorage) resolveOnce(ctx context.Context, request PublicResolveRequest) (*verifiedPublicArchive, error) {
+func (storage *PublicCacheIndex) resolveOnce(ctx context.Context, request PublicResolveRequest) (*verifiedPublicArchive, error) {
 	storage.mu.Lock()
 	if storage.closed {
 		storage.mu.Unlock()
 		return nil, ErrNotFound
 	}
-	if cached := storage.byIdentity[request.Identity]; cached != nil && !storage.now().UTC().After(cached.expiresAt) {
+	if cached := storage.byIdentity[request.CacheIdentity]; cached != nil && !storage.now().UTC().After(cached.expiresAt) {
 		storage.mu.Unlock()
 		refreshed, err := storage.RevalidateEntry(ctx, cached.entry.Public)
 		if err != nil {
 			return nil, err
 		}
 		storage.mu.Lock()
-		if current := storage.byIdentity[request.Identity]; current != nil {
+		if current := storage.byIdentity[request.CacheIdentity]; current != nil {
 			current.entry.Public = clonePublicEntryMetadata(refreshed)
 			current.expiresAt = refreshed.ExpiresAt
 			cached = current
@@ -276,7 +284,7 @@ func (storage *PublicStorage) resolveOnce(ctx context.Context, request PublicRes
 		storage.mu.Unlock()
 		return cached, nil
 	}
-	if running := storage.inflight[request.Identity]; running != nil {
+	if running := storage.inflight[request.CacheIdentity]; running != nil {
 		storage.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -286,20 +294,20 @@ func (storage *PublicStorage) resolveOnce(ctx context.Context, request PublicRes
 		}
 	}
 	call := &publicResolveCall{done: make(chan struct{})}
-	storage.inflight[request.Identity] = call
+	storage.inflight[request.CacheIdentity] = call
 	storage.mu.Unlock()
 
 	call.archive, call.err = storage.resolveAndVerify(ctx, request)
 	storage.mu.Lock()
-	delete(storage.inflight, request.Identity)
+	delete(storage.inflight, request.CacheIdentity)
 	var previous *verifiedPublicArchive
 	if call.err == nil && !storage.closed {
-		if previous = storage.byIdentity[request.Identity]; previous != nil {
+		if previous = storage.byIdentity[request.CacheIdentity]; previous != nil {
 			delete(storage.byID, previous.entry.ID)
 		}
 		storage.nextID++
 		call.archive.entry.ID = storage.nextID
-		storage.byIdentity[request.Identity] = call.archive
+		storage.byIdentity[request.CacheIdentity] = call.archive
 		storage.byID[call.archive.entry.ID] = call.archive
 	} else if call.err == nil {
 		call.err = ErrNotFound
@@ -315,7 +323,7 @@ func (storage *PublicStorage) resolveOnce(ctx context.Context, request PublicRes
 	return call.archive, call.err
 }
 
-func (storage *PublicStorage) resolveAndVerify(ctx context.Context, request PublicResolveRequest) (*verifiedPublicArchive, error) {
+func (storage *PublicCacheIndex) resolveAndVerify(ctx context.Context, request PublicResolveRequest) (*verifiedPublicArchive, error) {
 	resolved, err := storage.resolver.Resolve(ctx, request)
 	if err != nil {
 		return nil, err
@@ -324,7 +332,7 @@ func (storage *PublicStorage) resolveAndVerify(ctx context.Context, request Publ
 		return nil, errors.New("Public Cache resolver returned no archive")
 	}
 	defer resolved.Archive.Close()
-	publication, err := storage.verifyEnvelope(resolved.Envelope, request, "", -1)
+	publication, err := storage.verifyEnvelope(resolved.Envelope, request, "", -1, "")
 	if err != nil {
 		return nil, fmt.Errorf("verify Actions Public Cache publication: %w", err)
 	}
@@ -380,21 +388,27 @@ func (storage *PublicStorage) resolveAndVerify(ctx context.Context, request Publ
 	if err := temporary.Close(); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(storage.stagingRoot, request.Identity+"-"+publication.Digest)
+	if storage.requireSafeArchive {
+		if err := validateSafeActionsArchive(temporaryPath); err != nil {
+			return nil, fmt.Errorf("verify Actions Public Cache archive members: %w", err)
+		}
+	}
+	path := filepath.Join(storage.stagingRoot, request.CacheIdentity+"-"+publication.Digest)
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return nil, err
 	}
 	publicMetadata := &PublicEntryMetadata{
 		Request: request, Envelope: resolved.Envelope, Digest: publication.Digest,
-		Size: publication.Size, ExpiresAt: publication.ExpiresAt,
+		Size: publication.Size, ExpiresAt: publication.ExpiresAt, PublicIdentity: publication.Identity(),
 	}
 	archive := &verifiedPublicArchive{
 		entry: Entry{
 			Key: request.Key, Version: request.Version, Ref: request.Ref, Size: size,
-			CreatedAt: publication.IssuedAt, Origin: SourcePublicCache, Public: publicMetadata,
+			CreatedAt: publication.IssuedAt, ProducerDuration: durationFromMilliseconds(publication.DurationMS),
+			Origin: SourcePublicCache, Public: publicMetadata,
 		},
 		repository: request.Repository, compatibility: request.Compatibility,
-		identity: request.Identity, digest: publication.Digest, expiresAt: publication.ExpiresAt, path: path,
+		identity: request.CacheIdentity, digest: publication.Digest, expiresAt: publication.ExpiresAt, path: path,
 		lease: lease,
 	}
 	lease = nil
@@ -420,63 +434,227 @@ func copyExactPublicArchive(destination io.Writer, source io.Reader, expectedSiz
 	return written, err
 }
 
+const (
+	maxActionsArchiveMembers       = 1_000_000
+	maxActionsArchiveName          = 4 << 10
+	maxActionsExpandedArchiveBytes = int64(100 << 30)
+	minActionsExpandedArchiveBytes = int64(1 << 30)
+)
+
+func validateSafeActionsArchive(archivePath string) error {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() < 0 {
+		return publictrust.ErrIdentity
+	}
+	buffered := bufio.NewReader(file)
+	magic, err := buffered.Peek(4)
+	if err != nil {
+		return publictrust.ErrIdentity
+	}
+	var reader io.Reader = buffered
+	var closeDecoder func()
+	switch {
+	case magic[0] == 0x1f && magic[1] == 0x8b:
+		gzipReader, err := gzip.NewReader(buffered)
+		if err != nil {
+			return publictrust.ErrIdentity
+		}
+		reader = gzipReader
+		closeDecoder = func() { _ = gzipReader.Close() }
+	case magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd:
+		zstdReader, err := zstd.NewReader(buffered, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(1<<30))
+		if err != nil {
+			return publictrust.ErrIdentity
+		}
+		reader = zstdReader
+		closeDecoder = zstdReader.Close
+	}
+	if closeDecoder != nil {
+		defer closeDecoder()
+	}
+	expandedLimit := maxActionsExpandedArchiveBytes
+	if info.Size() <= maxActionsExpandedArchiveBytes/100 {
+		expandedLimit = info.Size() * 100
+		if expandedLimit < minActionsExpandedArchiveBytes {
+			expandedLimit = minActionsExpandedArchiveBytes
+		}
+	}
+	limited := &io.LimitedReader{R: reader, N: expandedLimit + 1}
+
+	tape := tar.NewReader(limited)
+	types := make(map[string]byte)
+	links := make(map[string]string)
+	var declaredFileBytes int64
+	for count := 0; ; count++ {
+		if count >= maxActionsArchiveMembers {
+			return errors.New("Actions cache archive has too many members")
+		}
+		header, err := tape.Next()
+		if errors.Is(err, io.EOF) {
+			if limited.N == 0 {
+				return errors.New("Actions cache archive expands beyond its safety limit")
+			}
+			break
+		}
+		if err != nil {
+			return publictrust.ErrIdentity
+		}
+		name, err := safeArchivePath(header.Name)
+		if err != nil {
+			return fmt.Errorf("unsafe archive member %q: %w", header.Name, err)
+		}
+		for key := range header.PAXRecords {
+			if strings.HasPrefix(key, "GNU.sparse.") || key == "SCHILY.realsize" {
+				return fmt.Errorf("Actions cache archive member %q uses unsupported sparse metadata", name)
+			}
+		}
+		if name == "." && header.Typeflag == tar.TypeDir {
+			continue
+		}
+		if _, duplicate := types[name]; duplicate {
+			return fmt.Errorf("duplicate Actions cache archive member %q", name)
+		}
+		if header.Mode&0o6000 != 0 {
+			return fmt.Errorf("Actions cache archive member %q has set-ID mode", name)
+		}
+		switch header.Typeflag {
+		case tar.TypeReg, legacyTarRegularFile:
+			if header.Size > expandedLimit-declaredFileBytes {
+				return errors.New("Actions cache archive file contents exceed the safety limit")
+			}
+			declaredFileBytes += header.Size
+		case tar.TypeDir:
+		case tar.TypeSymlink:
+			target, err := safeArchiveSymlinkTarget(name, header.Linkname)
+			if err != nil {
+				return fmt.Errorf("unsafe archive symlink %q: %w", name, err)
+			}
+			links[name] = target
+		case tar.TypeLink:
+			target, err := safeArchivePath(header.Linkname)
+			if err != nil {
+				return fmt.Errorf("unsafe archive hard link %q: %w", name, err)
+			}
+			links[name] = target
+		default:
+			return fmt.Errorf("Actions cache archive member %q has unsupported type %d", name, header.Typeflag)
+		}
+		types[name] = header.Typeflag
+	}
+	if len(types) == 0 {
+		return errors.New("Actions cache archive has no members")
+	}
+	for name := range types {
+		for ancestor := path.Dir(name); ancestor != "." && ancestor != "/"; ancestor = path.Dir(ancestor) {
+			if ancestorType, present := types[ancestor]; present && ancestorType != tar.TypeDir {
+				return fmt.Errorf("Actions cache archive member %q descends through non-directory %q", name, ancestor)
+			}
+		}
+	}
+	for name, target := range links {
+		targetType, found := types[target]
+		if !found || targetType == tar.TypeSymlink || targetType == tar.TypeLink ||
+			types[name] == tar.TypeLink && targetType != tar.TypeReg && targetType != legacyTarRegularFile {
+			return fmt.Errorf("Actions cache archive link %q has an unsafe target", name)
+		}
+	}
+	return nil
+}
+
+func safeArchiveSymlinkTarget(name, target string) (string, error) {
+	if target == "" || len(target) > maxActionsArchiveName || strings.ContainsRune(target, 0) ||
+		strings.Contains(target, `\`) || strings.HasPrefix(target, "/") {
+		return "", publictrust.ErrIdentity
+	}
+	return safeArchivePath(path.Join(path.Dir(name), target))
+}
+
+func safeArchivePath(value string) (string, error) {
+	if value == "" || len(value) > maxActionsArchiveName || strings.ContainsRune(value, 0) ||
+		strings.Contains(value, `\`) || strings.HasPrefix(value, "/") {
+		return "", publictrust.ErrIdentity
+	}
+	cleaned := path.Clean(value)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", publictrust.ErrIdentity
+	}
+	first, _, _ := strings.Cut(cleaned, "/")
+	if strings.Contains(first, ":") {
+		return "", publictrust.ErrIdentity
+	}
+	return cleaned, nil
+}
+
 // RevalidateEntry authorizes one warmed Public Cache entry. An authoritative
 // online response always wins. When the network is explicitly offline, it
 // verifies the persisted envelope and permits use only through its signed
 // expiry. Every field used for restoration is checked against signed data.
-func (storage *PublicStorage) RevalidateEntry(ctx context.Context, metadata *PublicEntryMetadata) (*PublicEntryMetadata, error) {
+func (storage *PublicCacheIndex) RevalidateEntry(ctx context.Context, metadata *PublicEntryMetadata) (*PublicEntryMetadata, error) {
 	if metadata == nil {
 		return nil, publictrust.ErrIdentity
 	}
 	envelope, err := storage.resolver.Revalidate(ctx, metadata.Request)
 	if err == nil {
-		publication, verifyErr := storage.verifyEnvelope(envelope, metadata.Request, metadata.Digest, metadata.Size)
+		publication, verifyErr := storage.verifyEnvelope(envelope, metadata.Request, metadata.Digest, metadata.Size, metadata.PublicIdentity)
 		if verifyErr != nil {
-			storage.forgetPublicIdentity(metadata.Request.Identity)
+			storage.forgetPublicIdentity(metadata.Request.CacheIdentity)
 			return nil, verifyErr
 		}
 		return &PublicEntryMetadata{
 			Request: metadata.Request, Envelope: envelope, Digest: publication.Digest,
-			Size: publication.Size, ExpiresAt: publication.ExpiresAt,
+			Size: publication.Size, ExpiresAt: publication.ExpiresAt, PublicIdentity: publication.Identity(),
 		}, nil
 	}
 	if !errors.Is(err, ErrPublicOffline) {
-		storage.forgetPublicIdentity(metadata.Request.Identity)
+		storage.forgetPublicIdentity(metadata.Request.CacheIdentity)
 		return nil, err
 	}
 
-	publication, err := storage.verifyEnvelope(metadata.Envelope, metadata.Request, metadata.Digest, metadata.Size)
+	publication, err := storage.verifyEnvelope(metadata.Envelope, metadata.Request, metadata.Digest, metadata.Size, metadata.PublicIdentity)
 	if err != nil {
-		storage.forgetPublicIdentity(metadata.Request.Identity)
+		storage.forgetPublicIdentity(metadata.Request.CacheIdentity)
 		return nil, err
 	}
 	if !publication.ExpiresAt.Equal(metadata.ExpiresAt) {
-		storage.forgetPublicIdentity(metadata.Request.Identity)
+		storage.forgetPublicIdentity(metadata.Request.CacheIdentity)
 		return nil, publictrust.ErrIdentity
 	}
 	return clonePublicEntryMetadata(metadata), nil
 }
 
-func (storage *PublicStorage) verifyEnvelope(
+func (storage *PublicCacheIndex) verifyEnvelope(
 	envelope publictrust.Envelope,
 	request PublicResolveRequest,
 	expectedDigest string,
 	expectedSize int64,
+	expectedPublicIdentity string,
 ) (publictrust.Publication, error) {
 	expected := request.Expected
 	expected.Digest = expectedDigest
+	expected.PublicIdentity = expectedPublicIdentity
+	if expectedSize >= 0 {
+		expected.Size = &expectedSize
+	}
 	publication, err := publictrust.Verify(storage.verificationKey, envelope, expected, storage.now().UTC())
 	if err != nil {
 		return publictrust.Publication{}, err
 	}
-	if publication.Identity() != request.Identity || publication.Repository != request.SourceRepository ||
+	if publication.CacheIdentity() != request.CacheIdentity || publication.Repository != request.SourceRepository ||
+		publication.Commit != request.SourceCommit || publication.RecipeDigest != request.RecipeDigest ||
+		publication.Target != request.Target || publication.Platform != request.Platform ||
+		publication.Toolchain != request.Toolchain || publication.Builder != request.Builder ||
 		expectedSize >= 0 && publication.Size != expectedSize {
 		return publictrust.Publication{}, publictrust.ErrIdentity
 	}
 	return publication, nil
 }
 
-func (storage *PublicStorage) forgetPublicIdentity(identity string) {
+func (storage *PublicCacheIndex) forgetPublicIdentity(identity string) {
 	storage.mu.Lock()
 	archive := storage.byIdentity[identity]
 	if archive != nil {
@@ -491,7 +669,7 @@ func (storage *PublicStorage) forgetPublicIdentity(identity string) {
 
 // ReleaseEntry discards a verified Public Cache staging file after CacheChain
 // has streamed it into Local Cache.
-func (storage *PublicStorage) ReleaseEntry(_ context.Context, id int64) error {
+func (storage *PublicCacheIndex) ReleaseEntry(_ context.Context, id int64) error {
 	storage.mu.Lock()
 	archive := storage.byID[id]
 	if archive != nil {
@@ -530,12 +708,46 @@ func clonePublicEntryMetadata(metadata *PublicEntryMetadata) *PublicEntryMetadat
 	return &cloned
 }
 
+// ClonePublicEntryMetadata returns an independent copy for durable storage
+// adapters outside this package.
+func ClonePublicEntryMetadata(metadata *PublicEntryMetadata) *PublicEntryMetadata {
+	return clonePublicEntryMetadata(metadata)
+}
+
 func cloneEntry(entry Entry) Entry {
 	entry.Public = clonePublicEntryMetadata(entry.Public)
+	entry.ProducerDuration = cloneDuration(entry.ProducerDuration)
 	return entry
 }
 
+func cloneDuration(duration *time.Duration) *time.Duration {
+	if duration == nil {
+		return nil
+	}
+	value := *duration
+	return &value
+}
+
+func durationNanoseconds(duration *time.Duration) *int64 {
+	if duration == nil {
+		return nil
+	}
+	value := int64(*duration)
+	return &value
+}
+
+func durationFromMilliseconds(milliseconds int64) *time.Duration {
+	if milliseconds < 0 || milliseconds > int64((time.Duration(1<<63-1))/time.Millisecond) {
+		return nil
+	}
+	value := time.Duration(milliseconds) * time.Millisecond
+	return &value
+}
+
 func normalizedCommitTrust(request CommitRequest) (CacheSource, *PublicEntryMetadata, error) {
+	if request.ProducerDuration != nil && *request.ProducerDuration < 0 {
+		return "", nil, errors.New("Actions cache producer duration cannot be negative")
+	}
 	origin := request.Origin
 	if origin == "" {
 		origin = SourceLocalCache
@@ -545,8 +757,8 @@ func normalizedCommitTrust(request CommitRequest) (CacheSource, *PublicEntryMeta
 	}
 	publicMetadata := clonePublicEntryMetadata(request.Public)
 	if origin == SourcePublicCache {
-		if publicMetadata == nil || publicMetadata.Request.Identity == "" || publicMetadata.Envelope.Payload == "" ||
-			publicMetadata.Digest == "" || publicMetadata.Size != request.Size || publicMetadata.ExpiresAt.IsZero() {
+		if publicMetadata == nil || publicMetadata.Request.CacheIdentity == "" || publicMetadata.Envelope.Payload == "" ||
+			publicMetadata.PublicIdentity == "" || publicMetadata.Digest == "" || publicMetadata.Size != request.Size || publicMetadata.ExpiresAt.IsZero() {
 			return "", nil, errors.New("Public Cache commit requires complete signed origin metadata")
 		}
 	} else if publicMetadata != nil {
@@ -555,23 +767,41 @@ func normalizedCommitTrust(request CommitRequest) (CacheSource, *PublicEntryMeta
 	return origin, publicMetadata, nil
 }
 
+// NormalizeCommitTrust applies the same origin and signed-metadata checks to
+// every Actions StorageIndex adapter.
+func NormalizeCommitTrust(request CommitRequest) (CacheSource, *PublicEntryMetadata, error) {
+	return normalizedCommitTrust(request)
+}
+
 func newPublicResolveRequest(scope Scope, sourceRepository, ref, key, version string) PublicResolveRequest {
-	nativeKey := actionsPublicNativeKey(scope.Repository, ref, key, version, scope.Compatibility)
+	nativeKey := actionsPublicNativeKey(scope, ref, key, version)
+	inputs := []publictrust.DeclaredInput{
+		{Name: "actions.key", Value: key},
+		{Name: "actions.ref", Value: ref},
+		{Name: "actions.version", Value: version},
+		{Name: "compatibility", Value: scope.Compatibility},
+	}
 	expected := publictrust.Expected{
 		Integration: "actions", Project: scope.Repository,
-		Compatibility: scope.Compatibility, NativeKey: nativeKey,
+		Compatibility: scope.Compatibility, NativeKey: nativeKey, Repository: sourceRepository,
+		Commit: scope.SourceCommit, RecipeDigest: scope.RecipeDigest, Target: scope.Target,
+		Platform:  scope.Platform,
+		Inputs:    inputs,
+		Toolchain: scope.Toolchain, Builder: scope.Builder,
 	}
-	identity := (publictrust.Publication{
+	cacheIdentity := (publictrust.Publication{
 		Integration: expected.Integration, Project: expected.Project,
 		Compatibility: expected.Compatibility, NativeKey: expected.NativeKey,
-	}).Identity()
+	}).CacheIdentity()
 	return PublicResolveRequest{
-		Identity: identity, Expected: expected, Repository: scope.Repository, SourceRepository: sourceRepository,
+		CacheIdentity: cacheIdentity, Expected: expected, Repository: scope.Repository, SourceRepository: sourceRepository,
 		Ref: ref, Key: key, Version: version, Compatibility: scope.Compatibility,
+		SourceCommit: scope.SourceCommit, RecipeDigest: scope.RecipeDigest, Target: scope.Target, Platform: scope.Platform,
+		Toolchain: scope.Toolchain, Builder: scope.Builder,
 	}
 }
 
-func (storage *PublicStorage) sourceRepositoryFor(repository string) (string, error) {
+func (storage *PublicCacheIndex) sourceRepositoryFor(repository string) (string, error) {
 	owner, name, err := splitActionsRepository(repository)
 	if err != nil {
 		return "", err
@@ -630,9 +860,12 @@ func validRepositoryComponent(value string, allowDotAndUnderscore bool) bool {
 	return true
 }
 
-func actionsPublicNativeKey(repository, ref, key, version, compatibility string) string {
+func actionsPublicNativeKey(scope Scope, ref, key, version string) string {
 	hasher := sha256.New()
-	for _, value := range []string{actionsPublicIdentityVersion, repository, ref, key, version, compatibility} {
+	for _, value := range []string{
+		actionsPublicIdentityVersion, scope.Repository, ref, key, version, scope.Compatibility,
+		scope.SourceCommit, scope.RecipeDigest, scope.Platform, scope.Toolchain, scope.Builder,
+	} {
 		var length [8]byte
 		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
 		hasher.Write(length[:])
@@ -641,10 +874,15 @@ func actionsPublicNativeKey(repository, ref, key, version, compatibility string)
 	return "sha256:" + hex.EncodeToString(hasher.Sum(nil))
 }
 
+func (scope Scope) hasCompletePublicIdentity() bool {
+	return scope.SourceCommit != "" && scope.RecipeDigest != "" && scope.Platform != "" &&
+		scope.Target != "" && scope.Toolchain != "" && scope.Builder != ""
+}
+
 func isUnavailablePublicIdentity(err error) bool {
 	return errors.Is(err, ErrPublicOffline) || errors.Is(err, publictrust.ErrNotFound) ||
 		errors.Is(err, publictrust.ErrRevoked) || errors.Is(err, publictrust.ErrAmbiguous) ||
 		errors.Is(err, publictrust.ErrExpired)
 }
 
-var _ StorageIndex = (*PublicStorage)(nil)
+var _ CacheReader = (*PublicCacheIndex)(nil)

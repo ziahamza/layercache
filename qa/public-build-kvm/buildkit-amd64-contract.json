@@ -1,0 +1,27 @@
+{
+  "protocol": "layercache.public-build/v1",
+  "platform": "linux/amd64",
+  "agent": "/sbin/layercache-public-build-guest",
+  "builder": "moby-buildkit-v0.32.2",
+  "toolchain": "buildkit-image-sha256-28a898719c18",
+  "controlPort": "org.layercache.public-build.1",
+  "maxProcesses": 512,
+  "features": [
+    "read-only-source",
+    "ephemeral-work-disk",
+    "process-limit",
+    "streamed-output",
+    "no-network"
+  ],
+  "recipes": [
+    {
+      "integration": "buildkit",
+      "target": "qa",
+      "digest": "sha256:1e0033911e615379d0b3ec463f5cfc119e498a66bb434201824a97d498160115",
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "resultFormat": "oci-image-layout-tar",
+      "executor": "buildkit-oci-v1",
+      "maxBytes": 134217728
+    }
+  ]
+}

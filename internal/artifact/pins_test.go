@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/layercache/layercache/internal/artifact"
@@ -56,6 +57,41 @@ func TestPinnedEntrySurvivesRestartAndLRUEvictionUntilReleased(t *testing.T) {
 	}
 	if _, _, err := store.Get(ctx, key); !errors.Is(err, artifact.ErrNotFound) {
 		t.Fatalf("Get released LRU entry = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteCannotRemovePinnedEntryAcrossConnectionPool(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := artifact.Open(ctx, t.TempDir(), 1<<20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	key := artifact.Key{Integration: "turbo", Project: "project", Compatibility: "linux-amd64", Native: "pinned-delete"}
+	entry, _, err := store.Put(ctx, key, artifact.Metadata{}, strings.NewReader("retained"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Pin(ctx, "team-upload", artifact.Pin{Owner: "upload-1", Key: key, Digest: entry.Digest, Size: entry.Size}); err != nil {
+		t.Fatal(err)
+	}
+
+	const attempts = 32
+	for range attempts {
+		if err := store.Delete(ctx, key); !errors.Is(err, artifact.ErrPinned) {
+			t.Fatalf("delete pinned entry = %v, want ErrPinned", err)
+		}
+	}
+	if _, err := store.Head(ctx, key); err != nil {
+		t.Fatalf("pinned entry disappeared: %v", err)
+	}
+	if err := store.Unpin(ctx, "team-upload", "upload-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, key); err != nil {
+		t.Fatalf("delete after unpin: %v", err)
 	}
 }
 

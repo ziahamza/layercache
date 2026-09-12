@@ -3,6 +3,7 @@ package acceptance_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +41,8 @@ func TestRunReportExplainsTurboMissThenLocalHit(t *testing.T) {
 
 	missRun := "run-report-miss"
 	putTurboForRun(t, cfg, missRun, artifactURL, want, 250*time.Millisecond)
+	assertTurboRunIsProvisional(t, cfg, missRun)
+	reconcileTurboRun(t, cfg, missRun, "report-fixture", measurement.ResultMiss, 250*time.Millisecond)
 	miss := reportForRun(t, binary, configPath, missRun)
 	if miss.Eligible != 1 || miss.Hits != 0 || miss.Misses != 1 {
 		t.Fatalf("miss report counts = %+v", miss)
@@ -56,6 +59,8 @@ func TestRunReportExplainsTurboMissThenLocalHit(t *testing.T) {
 	if !bytes.Equal(got, want) || source != "local" {
 		t.Fatalf("restored %q from %q", got, source)
 	}
+	assertTurboRunIsProvisional(t, cfg, hitRun)
+	reconcileTurboRun(t, cfg, hitRun, "report-fixture", measurement.ResultHit, 10*time.Millisecond)
 	hit := reportForRun(t, binary, configPath, hitRun)
 	if hit.Eligible != 1 || hit.Hits != 1 || hit.Misses != 0 || hit.HitRate != 1 {
 		t.Fatalf("hit report counts = %+v", hit)
@@ -73,7 +78,7 @@ func TestRunReportExplainsTurboMissThenLocalHit(t *testing.T) {
 
 func putTurboForRun(t *testing.T, cfg config.Config, runID, artifactURL string, body []byte, duration time.Duration) {
 	t.Helper()
-	token, err := access.MintWorkspaceToken(cfg.LocalToken, runID, time.Now().UTC(), time.Hour)
+	token, err := mintTurboCapabilityForRun(cfg, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +101,7 @@ func putTurboForRun(t *testing.T, cfg config.Config, runID, artifactURL string, 
 
 func getTurboForRun(t *testing.T, cfg config.Config, runID, artifactURL string) ([]byte, string) {
 	t.Helper()
-	token, err := access.MintWorkspaceToken(cfg.LocalToken, runID, time.Now().UTC(), time.Hour)
+	token, err := mintTurboCapabilityForRun(cfg, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +123,81 @@ func getTurboForRun(t *testing.T, cfg config.Config, runID, artifactURL string) 
 		t.Fatalf("Turbo GET status = %d: %s", response.StatusCode, body)
 	}
 	return body, response.Header.Get("x-layercache-source")
+}
+
+func mintTurboCapabilityForRun(cfg config.Config, runID string) (string, error) {
+	now := time.Now().UTC()
+	return access.MintCapabilityToken(cfg.LocalToken, access.Claims{
+		Subject: cfg.InstallationID, RunID: runID, Project: cfg.ProjectID,
+		Integration: "turbo", Compatibility: cfg.CompatibilityID,
+		Capabilities: []access.Capability{access.CapabilityWrite}, ExpiresAt: now.Add(time.Hour),
+	}, now)
+}
+
+func assertTurboRunIsProvisional(t *testing.T, cfg config.Config, runID string) {
+	t.Helper()
+	repository, err := measurement.OpenSQLiteRepository(filepath.Join(cfg.DataDir, "measurements.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	if _, err := repository.RunReport(runID); !errors.Is(err, measurement.ErrRunNotFound) {
+		t.Fatalf("raw Turbo transport observations produced a final run report: %v", err)
+	}
+}
+
+func reconcileTurboRun(
+	t *testing.T,
+	cfg config.Config,
+	runID string,
+	hash string,
+	result measurement.Result,
+	execution time.Duration,
+) {
+	t.Helper()
+	startedAt := time.Now().UTC()
+	finishedAt := startedAt.Add(execution)
+	hit := result == measurement.ResultHit
+	timeSaved := int64(0)
+	source := ""
+	if hit {
+		timeSaved = 250
+		source = "REMOTE"
+	}
+	document, err := json.Marshal(map[string]any{
+		"id": "summary-" + runID, "version": "1",
+		"execution": map[string]any{
+			"startTime": startedAt.UnixMilli(), "endTime": finishedAt.UnixMilli(),
+		},
+		"tasks": []any{map[string]any{
+			"taskId": "pkg#build", "hash": hash, "dependencies": []string{},
+			"cache": map[string]any{
+				"local": false, "remote": hit, "status": string(result),
+				"source": source, "timeSaved": timeSaved,
+			},
+			"execution": map[string]any{
+				"startTime": startedAt.UnixMilli(), "endTime": finishedAt.UnixMilli(), "exitCode": 0,
+			},
+			"resolvedTaskDefinition": map[string]any{"cache": true},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := measurement.OpenSQLiteRepository(filepath.Join(cfg.DataDir, "measurements.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	count, err := repository.ReconcileTurboSummaries(runID, measurement.TurboReconcileOptions{
+		Project: cfg.ProjectID, CompatibilityID: cfg.CompatibilityID,
+	}, [][]byte{document})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("reconciled Turbo tasks = %d, want 1", count)
+	}
 }
 
 func reportForRun(t *testing.T, binary, configPath, runID string) measurement.RunReport {

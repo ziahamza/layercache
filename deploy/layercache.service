@@ -1,0 +1,31 @@
+[Unit]
+Description=Layer Cache Team Cache API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=layercache
+Group=layercache
+ExecStart=/usr/local/bin/layercache serve --config /etc/layercache/config.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+UMask=0077
+StateDirectory=layercache
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/layercache
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

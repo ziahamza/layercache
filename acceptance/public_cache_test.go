@@ -18,6 +18,9 @@ func TestVerifiedPublicCacheWarmsLocalAndRejectsClientWrites(t *testing.T) {
 	binary := buildLayerCache(t)
 	publicAddress := availableAddress(t)
 	publicConfig := filepath.Join(root, "public.json")
+	githubAPI := acceptingGitHubAPI(t)
+	const target = "@acme/widget#turbo-cache"
+	recipe := publicFixtureRecipe("turbo", target)
 	runLayerCache(t,
 		"setup", "--config", publicConfig,
 		"--data-dir", filepath.Join(root, "public-cache"),
@@ -25,6 +28,10 @@ func TestVerifiedPublicCacheWarmsLocalAndRejectsClientWrites(t *testing.T) {
 		"--role", "public",
 		"--project", "github.com/acme/widget",
 		"--publisher-token", "publisher-secret",
+		"--github-api-url", githubAPI,
+		"--public-build-repository", publicFixtureRepository,
+		"--public-build-approved-ref", "refs/heads/main",
+		"--public-build-recipe", recipe,
 		"--max-size", "10485760",
 		"--non-interactive", "--json",
 	)
@@ -36,6 +43,7 @@ func TestVerifiedPublicCacheWarmsLocalAndRejectsClientWrites(t *testing.T) {
 		t.Fatal("public trust key is empty")
 	}
 	publicServer := startLayerCache(t, binary, publicConfig, publicAddress)
+	buildID, workerID, leaseToken := requestAndLeasePublicBuild(t, publicConfig, "turbo", target, "linux/amd64")
 
 	want := []byte("artifact-built-by-layercache-public-build")
 	artifactFile := filepath.Join(root, "public-artifact.bin")
@@ -47,21 +55,22 @@ func TestVerifiedPublicCacheWarmsLocalAndRejectsClientWrites(t *testing.T) {
 		"--config", publicConfig,
 		"--file", artifactFile,
 		"--hash", "trusted-public-hash",
-		"--repository", "https://github.com/acme/widget",
-		"--commit", "0123456789abcdef0123456789abcdef01234567",
-		"--recipe", "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"--repository", publicFixtureRepository,
+		"--commit", publicFixtureCommit,
+		"--recipe", recipe,
+		"--target", target,
 		"--platform", "linux/amd64",
 		"--toolchain", "turbo@2.10.9",
 		"--builder", "layercache-builder@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-		"--build-id", "build-123",
+		"--builder-image-digest", "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		"--build-id", buildID,
+		"--worker-id", workerID,
+		"--lease-token", leaseToken,
 		"--duration", "9500",
 		"--json",
 	)
 
-	var publicConnection turboConnection
-	if err := json.Unmarshal(runLayerCache(t, "integration", "turbo", "--config", publicConfig, "--json"), &publicConnection); err != nil {
-		t.Fatal(err)
-	}
+	publicConnection := captureTurboConnection(t, binary, publicConfig)
 	request, err := http.NewRequest(http.MethodPut, publicConnection.APIURL+"/v8/artifacts/trusted-public-hash", bytes.NewReader([]byte("client-poison")))
 	if err != nil {
 		t.Fatal(err)
@@ -88,12 +97,9 @@ func TestVerifiedPublicCacheWarmsLocalAndRejectsClientWrites(t *testing.T) {
 		"--max-size", "10485760",
 		"--non-interactive", "--json",
 	)
-	var host turboConnection
-	if err := json.Unmarshal(runLayerCache(t, "integration", "turbo", "--config", hostConfig, "--json"), &host); err != nil {
-		t.Fatal(err)
-	}
 	hostServer := startLayerCache(t, binary, hostConfig, hostAddress)
 	defer hostServer.stop(t)
+	host := captureTurboConnection(t, binary, hostConfig)
 
 	got, source := fetchTurboArtifact(t, host.APIURL+"/v8/artifacts/trusted-public-hash", host.Token)
 	if !bytes.Equal(got, want) || source != "public" {

@@ -33,10 +33,7 @@ func TestWarmedPublicArchivePersistsTrustAndUsesSignedLeaseOffline(t *testing.T)
 	clock := &testClock{now: issuedAt.Add(time.Hour)}
 	body := []byte("persistent verified Public Cache archive")
 	resolver := newStatefulPublicResolver(privateKey, issuedAt, expiresAt, body)
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	lookup := actionscache.LookupRequest{Scope: scope, Keys: []string{"pnpm-public"}, Version: "v1"}
 
 	artifacts, local, public, hierarchy := openPersistentPublicHierarchy(t, ctx, root, publicKey, resolver, clock.Now)
@@ -94,10 +91,7 @@ func TestOnlineRevocationInvalidatesWarmedPublicArchiveBeforeFallback(t *testing
 	issuedAt := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
 	clock := &testClock{now: issuedAt.Add(time.Hour)}
 	resolver := newStatefulPublicResolver(privateKey, issuedAt, issuedAt.Add(24*time.Hour), []byte("later revoked"))
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	lookup := actionscache.LookupRequest{Scope: scope, Keys: []string{"revoked-public"}, Version: "v1"}
 	artifacts, local, public, hierarchy := openPersistentPublicHierarchy(t, ctx, root, publicKey, resolver, clock.Now)
 	defer closePersistentPublicHierarchy(t, artifacts, local, public)
@@ -131,10 +125,7 @@ func TestOnlineRevalidationPersistsRenewedSignedLease(t *testing.T) {
 	renewedExpiry := issuedAt.Add(8 * time.Hour)
 	clock := &testClock{now: issuedAt.Add(time.Hour)}
 	resolver := newStatefulPublicResolver(privateKey, issuedAt, originalExpiry, []byte("renewed lease bytes"))
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	lookup := actionscache.LookupRequest{Scope: scope, Keys: []string{"renewed-public"}, Version: "v1"}
 	artifacts, local, public, hierarchy := openPersistentPublicHierarchy(t, ctx, root, publicKey, resolver, clock.Now)
 	if _, err := hierarchy.Lookup(ctx, lookup); err != nil {
@@ -174,10 +165,7 @@ func TestOnlineRevalidationRejectsChangedDigestAndSize(t *testing.T) {
 	issuedAt := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
 	clock := &testClock{now: issuedAt.Add(time.Hour)}
 	resolver := newStatefulPublicResolver(privateKey, issuedAt, issuedAt.Add(24*time.Hour), []byte("original bytes"))
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	lookup := actionscache.LookupRequest{Scope: scope, Keys: []string{"changed-public"}, Version: "v1"}
 	artifacts, local, public, hierarchy := openPersistentPublicHierarchy(t, ctx, t.TempDir(), publicKey, resolver, clock.Now)
 	defer closePersistentPublicHierarchy(t, artifacts, local, public)
@@ -205,7 +193,7 @@ func TestOnlineRevalidationRejectsDifferentExactIdentity(t *testing.T) {
 	issuedAt := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
 	clock := &testClock{now: issuedAt.Add(time.Hour)}
 	resolver := newStatefulPublicResolver(privateKey, issuedAt, issuedAt.Add(24*time.Hour), []byte("identity-bound bytes"))
-	public, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	public, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: t.TempDir(), Now: clock.Now,
 	}, resolver)
 	if err != nil {
@@ -213,11 +201,8 @@ func TestOnlineRevalidationRejectsDifferentExactIdentity(t *testing.T) {
 	}
 	defer public.Close()
 	result, err := public.Lookup(ctx, actionscache.LookupRequest{
-		Scope: actionscache.Scope{
-			Repository: "acme/widgets", Ref: "refs/heads/main",
-			DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-		},
-		Keys: []string{"identity-public"}, Version: "v1",
+		Scope: publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24"),
+		Keys:  []string{"identity-public"}, Version: "v1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -270,7 +255,7 @@ func openPersistentPublicHierarchy(
 	publicKey ed25519.PublicKey,
 	resolver actionscache.PublicResolver,
 	now func() time.Time,
-) (*artifact.Store, *actionscache.PersistentStorage, *actionscache.PublicStorage, *actionscache.CacheChain) {
+) (*artifact.Store, *actionscache.PersistentStorage, *actionscache.PublicCacheIndex, *actionscache.CacheChain) {
 	t.Helper()
 	artifacts, err := artifact.Open(ctx, filepath.Join(root, "cas"), 1<<20, 0)
 	if err != nil {
@@ -281,7 +266,7 @@ func openPersistentPublicHierarchy(
 		artifacts.Close()
 		t.Fatal(err)
 	}
-	public, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	public, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: filepath.Join(root, "public-staging"), Now: now,
 	}, resolver)
 	if err != nil {
@@ -303,7 +288,7 @@ func closePersistentPublicHierarchy(
 	t *testing.T,
 	artifacts *artifact.Store,
 	local *actionscache.PersistentStorage,
-	public *actionscache.PublicStorage,
+	public *actionscache.PublicCacheIndex,
 ) {
 	t.Helper()
 	if err := public.Close(); err != nil {
@@ -426,11 +411,12 @@ func (resolver *statefulPublicResolver) sign(request actionscache.PublicResolveR
 	publication := publictrust.Publication{
 		Integration: request.Expected.Integration, Project: request.Expected.Project,
 		Compatibility: request.Expected.Compatibility, NativeKey: request.Expected.NativeKey,
-		Repository: request.SourceRepository, Commit: "0123456789abcdef0123456789abcdef01234567",
-		RecipeDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Platform:     "linux/amd64", Toolchain: "actions/cache@v5",
-		Builder: "layercache-public-builder@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		Digest:  hex.EncodeToString(digest[:]), Size: int64(len(body)), DurationMS: 500,
+		Repository: request.SourceRepository, Commit: request.SourceCommit,
+		RecipeDigest: request.RecipeDigest, Target: request.Target,
+		Platform: request.Platform, Inputs: append([]publictrust.DeclaredInput(nil), request.Expected.Inputs...),
+		Toolchain: request.Toolchain, Builder: request.Builder,
+		BuilderImageDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Digest:             hex.EncodeToString(digest[:]), Size: int64(len(body)), DurationMS: 500,
 		BuildID: "public-build-123", IssuedAt: resolver.issuedAt, ExpiresAt: resolver.expiresAt,
 	}
 	privateKey := append(ed25519.PrivateKey(nil), resolver.privateKey...)

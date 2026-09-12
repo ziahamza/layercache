@@ -1,0 +1,830 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  public-build-qualification:
+    name: Require native arm64 Public Build evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require a successful native qualification of this source commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TRUSTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          gh api --method GET --paginate \
+            "repos/$GH_REPO/actions/workflows/public-build-native.yml/runs" \
+            -f event=workflow_dispatch -f status=completed -f head_sha="$TRUSTED_SHA" -f per_page=100 \
+            > "$RUNNER_TEMP/native-runs.json"
+          run_id="$(jq -sr --arg sha "$TRUSTED_SHA" '
+            [.[] | .workflow_runs[] | select(
+              .head_sha == $sha and .head_branch == "main" and
+              .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success"
+            )] | sort_by(.run_number) | last | .id // empty
+          ' "$RUNNER_TEMP/native-runs.json")"
+          if ! [[ "$run_id" =~ ^[0-9]+$ ]]; then
+            echo "Native Linux arm64 Public Builds have not passed for $TRUSTED_SHA." >&2
+            echo 'Dispatch Native Public Build qualification on protected main at this exact commit, then rerun Release.' >&2
+            exit 1
+          fi
+          gh api --method GET --paginate "repos/$GH_REPO/actions/runs/$run_id/jobs" \
+            -f filter=latest -f per_page=100 > "$RUNNER_TEMP/native-jobs.json"
+          jq -se '
+            [.[] | .jobs[] | select(
+              .name == "Reviewed Public Builds / Linux arm64 KVM" and
+              .status == "completed" and .conclusion == "success" and
+              (.labels | index("layercache-kvm")) != null
+            )] | length == 1
+          ' "$RUNNER_TEMP/native-jobs.json" >/dev/null
+          jq -n --arg sha "$TRUSTED_SHA" --arg repo "$GH_REPO" --argjson run "$run_id" \
+            '{sourceCommit:$sha,repository:$repo,nativeArm64QualificationRun:$run}' \
+            > "$RUNNER_TEMP/public-build-qualification.json"
+          printf 'Native arm64 Public Builds: https://github.com/%s/actions/runs/%s\n' "$GH_REPO" "$run_id" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve the qualification receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-build-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/public-build-qualification.json
+          if-no-files-found: error
+          retention-days: 30
+
+  performance:
+    name: Release cache performance
+    uses: ./.github/workflows/performance.yml
+
+  lint:
+    name: Release workflow and shell checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.13"
+          cache: false
+      - name: Install pinned lint tools
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          curl --fail --silent --show-error --location \
+            https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz \
+            --output "$RUNNER_TEMP/shellcheck.tar.xz"
+          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum --check --strict
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-v0.10.0" >> "$GITHUB_PATH"
+      - name: Check workflows, scripts, and whitespace
+        run: bash qa/lint.sh
+
+  native:
+    name: Native QA / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            uname: x86_64
+            artifact: layercache-linux-amd64
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+            uname: aarch64
+            artifact: layercache-linux-arm64
+          - name: macOS arm64
+            runner: macos-26
+            goos: darwin
+            goarch: arm64
+            uname: arm64
+            artifact: layercache-darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.13"
+          cache: false
+
+      - name: Set up Node.js for real-client QA
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24.13.0"
+
+      - name: Install pinned pnpm and locked client fixtures
+        run: |
+          npm install --global pnpm@10.34.5
+          pnpm --dir action/cache install --frozen-lockfile
+          pnpm --dir qa/fixtures/turbo install --frozen-lockfile
+          pnpm --dir qa/fixtures/turbo-minimum install --frozen-lockfile
+          pnpm --dir qa/fixtures/actions-cache-minimum install --frozen-lockfile
+
+      - name: Require the native release architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.uname }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCH"
+
+      - name: Install and verify the pinned current Buildx client
+        if: matrix.goos == 'linux'
+        env:
+          DOCKER_CONFIG_DIR: ${{ runner.temp }}/layercache-docker-config
+          BUILDX_PLATFORM: linux-${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -r '.buildx.current.version' qa/client-versions.json)"
+          SHA256="$(jq -r --arg platform "$BUILDX_PLATFORM" '.buildx.current.sha256[$platform]' qa/client-versions.json)"
+          qa/install-buildx-client.sh "$VERSION" "$SHA256" "$DOCKER_CONFIG_DIR"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG_DIR" >> "$GITHUB_ENV"
+
+      - name: Build release candidate
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: ${{ matrix.goarch }}
+          GOOS: ${{ matrix.goos }}
+          OUTPUT: dist/${{ matrix.artifact }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -buildvcs=true -o "$OUTPUT" ./cmd/layercache
+          test -x "$OUTPUT"
+          file "$OUTPUT"
+
+      - name: Run source checks
+        run: |
+          go test ./... -count=1 -timeout=25m
+          go vet ./...
+
+      - name: Run installed-binary acceptance QA
+        env:
+          LAYERCACHE_ACCEPTANCE_BINARY: ${{ github.workspace }}/dist/${{ matrix.artifact }}
+        run: go test ./acceptance -count=1 -timeout=25m
+
+      - name: Test installer and setup with the native candidate
+        env:
+          LAYERCACHE_SETUP_BINARY: ${{ github.workspace }}/dist/${{ matrix.artifact }}
+        run: node --test action/setup/setup.test.mjs scripts/install.test.mjs
+
+      - name: Exercise pinned Turbo and stock Actions cache clients
+        env:
+          LAYER_CACHE_BIN: ${{ github.workspace }}/dist/${{ matrix.artifact }}
+          QA_ROOT: ${{ runner.temp }}/layercache-real-clients
+        run: |
+          set -euo pipefail
+          QA_CONFIG="$QA_ROOT/config.json"
+          mkdir -p "$QA_ROOT/actions-a" "$QA_ROOT/actions-b"
+          "$LAYER_CACHE_BIN" setup \
+            --config "$QA_CONFIG" \
+            --data-dir "$QA_ROOT/data" \
+            --listen 127.0.0.1:17437 \
+            --buildkit-builder "layercache-release-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --max-size 1073741824 \
+            --min-free-bytes 0 \
+            --non-interactive --json
+          "$LAYER_CACHE_BIN" start --config "$QA_CONFIG" --json
+          cleanup_daemon() {
+            "$LAYER_CACHE_BIN" stop --config "$QA_CONFIG" --json >/dev/null 2>&1 || true
+          }
+          trap cleanup_daemon EXIT
+
+          test "$(node -p "require('./qa/fixtures/turbo/package.json').devDependencies.turbo")" = \
+            "$(node -p "require('./qa/client-versions.json').turbo.current")"
+          test "$(node -p "require('./qa/fixtures/turbo-minimum/package.json').devDependencies.turbo")" = \
+            "$(node -p "require('./qa/client-versions.json').turbo.minimum")"
+          test "$(node -p "require('./action/cache/package.json').dependencies['@actions/cache']")" = \
+            "$(node -p "require('./qa/client-versions.json').actionsCache.current")"
+          test "$(node -p "require('./qa/fixtures/actions-cache-minimum/package.json').dependencies['@actions/cache']")" = \
+            "$(node -p "require('./qa/client-versions.json').actionsCache.minimum")"
+
+          exercise_turbo() {
+            fixture_path="$1"
+            expected="$2"
+            slot="$3"
+            cold_fixture="$QA_ROOT/turbo-clone-cold/$fixture_path"
+            warm_fixture="$QA_ROOT/turbo-clone-warm/$fixture_path"
+            counter="$QA_ROOT/turbo-$slot-executions"
+            cold_log="$QA_ROOT/turbo-$slot-cold.stderr"
+            warm_log="$QA_ROOT/turbo-$slot-warm.stderr"
+            (
+              cd "$cold_fixture"
+              EXECUTION_COUNTER="$counter" "$LAYER_CACHE_BIN" run --config "$QA_CONFIG" -- \
+                pnpm exec turbo run build --remote-only --summarize
+            ) 2>"$cold_log" || { cat "$cold_log" >&2; return 1; }
+            cat "$cold_log" >&2
+            test "$(wc -l < "$counter")" -eq 1
+            cold_run="$(sed -n 's/^Layer Cache run: //p' "$cold_log")"
+            test -n "$cold_run"
+            cold_report="$("$LAYER_CACHE_BIN" report --config "$QA_CONFIG" --run "$cold_run" --json)"
+            jq -e --arg run "$cold_run" '
+              .runId == $run and .eligible == 1 and .hits == 0 and .misses == 1 and
+              .degraded == false and .netEstimatedBuildTimeSaved.method == "criticalPath" and
+              .netEstimatedBuildTimeSaved.known == 1 and
+              (.netEstimatedBuildTimeSaved.milliseconds | type) == "number" and
+              ([.outcomes[] | select(.integration == "turbo" and .result == "miss")] | length) == 1
+            ' <<<"$cold_report"
+            cp "$cold_fixture/packages/app/dist/result.txt" "$QA_ROOT/turbo-$slot-cold-result.txt"
+            (
+              cd "$warm_fixture"
+              EXECUTION_COUNTER="$counter" "$LAYER_CACHE_BIN" run --config "$QA_CONFIG" -- \
+                pnpm exec turbo run build --remote-only --summarize
+            ) 2>"$warm_log" || { cat "$warm_log" >&2; return 1; }
+            cat "$warm_log" >&2
+            test "$(wc -l < "$counter")" -eq 1
+            printf '%s\n' "$expected" >"$QA_ROOT/turbo-$slot-expected-result.txt"
+            cmp "$QA_ROOT/turbo-$slot-expected-result.txt" "$warm_fixture/packages/app/dist/result.txt"
+            cmp "$QA_ROOT/turbo-$slot-cold-result.txt" "$warm_fixture/packages/app/dist/result.txt"
+            warm_run="$(sed -n 's/^Layer Cache run: //p' "$warm_log")"
+            test -n "$warm_run"
+            warm_report="$("$LAYER_CACHE_BIN" report --config "$QA_CONFIG" --run "$warm_run" --json)"
+            jq -e --arg run "$warm_run" '
+              .runId == $run and .eligible == 1 and .hits == 1 and .misses == 0 and
+              .degraded == false and .bytes.downloaded > 0 and
+              .netEstimatedBuildTimeSaved.method == "criticalPath" and
+              .netEstimatedBuildTimeSaved.known == 1 and
+              (.netEstimatedBuildTimeSaved.milliseconds | type) == "number" and
+              ([.outcomes[] | select(
+                .integration == "turbo" and .result == "hit" and .source == "localCache" and
+                (.producerDurationMs | type) == "number"
+              )] | length) == 1
+            ' <<<"$warm_report"
+          }
+          origin_url="$(git remote get-url origin)"
+          for clone in "$QA_ROOT/turbo-clone-cold" "$QA_ROOT/turbo-clone-warm"; do
+            git clone --quiet --no-local "$GITHUB_WORKSPACE" "$clone"
+            git -C "$clone" remote set-url origin "$origin_url"
+            pnpm --dir "$clone/qa/fixtures/turbo" install --frozen-lockfile
+            pnpm --dir "$clone/qa/fixtures/turbo-minimum" install --frozen-lockfile
+          done
+          exercise_turbo qa/fixtures/turbo "layercache turbo fixture" current
+          exercise_turbo qa/fixtures/turbo-minimum "layercache turbo minimum fixture" minimum
+
+          exercise_actions_cache() {
+            client_module="$1"
+            slot="$2"
+            key="release-actions-v1-$slot"
+            save_root="$QA_ROOT/actions-$slot-save"
+            restore_root="$QA_ROOT/actions-$slot-restore"
+            cold_log="$QA_ROOT/actions-$slot-cold.stderr"
+            warm_log="$QA_ROOT/actions-$slot-warm.stderr"
+            mkdir -p "$save_root" "$restore_root"
+            "$LAYER_CACHE_BIN" run --config "$QA_CONFIG" -- \
+              node "$GITHUB_WORKSPACE/qa/stock-actions-cache.mjs" \
+              miss-save "$save_root" "$key" "$client_module" \
+              2>"$cold_log" || { cat "$cold_log" >&2; return 1; }
+            cat "$cold_log" >&2
+            cold_run="$(sed -n 's/^Layer Cache run: //p' "$cold_log")"
+            test -n "$cold_run"
+            cold_report="$("$LAYER_CACHE_BIN" report --config "$QA_CONFIG" --run "$cold_run" --json)"
+            jq -e --arg run "$cold_run" '
+              .runId == $run and .eligible == 1 and .hits == 0 and .misses == 1 and
+              .degraded == false and .bytes.uploaded > 0 and
+              .netEstimatedBuildTimeSaved.method == "criticalPath" and
+              .netEstimatedBuildTimeSaved.known == 1 and
+              (.netEstimatedBuildTimeSaved.milliseconds | type) == "number" and
+              ([.outcomes[] | select(
+                .integration == "actions" and .result == "miss" and
+                (.executionDurationMs | type) == "number" and .bytes.uploaded > 0
+              )] | length) == 1
+            ' <<<"$cold_report"
+            "$LAYER_CACHE_BIN" run --config "$QA_CONFIG" -- \
+              node "$GITHUB_WORKSPACE/qa/stock-actions-cache.mjs" \
+              restore "$restore_root" "$key" "$client_module" \
+              2>"$warm_log" || { cat "$warm_log" >&2; return 1; }
+            cat "$warm_log" >&2
+            test "$(cat "$restore_root/.fixture-cache/value.txt")" = \
+              "restored by stock actions/cache"
+            warm_run="$(sed -n 's/^Layer Cache run: //p' "$warm_log")"
+            test -n "$warm_run"
+            warm_report="$("$LAYER_CACHE_BIN" report --config "$QA_CONFIG" --run "$warm_run" --json)"
+            jq -e --arg run "$warm_run" '
+              .runId == $run and .eligible == 1 and .hits == 1 and .misses == 0 and
+              .degraded == false and .bytes.downloaded > 0 and
+              .grossAvoidedTaskTime.known == 1 and
+              .netEstimatedBuildTimeSaved.method == "criticalPath" and
+              .netEstimatedBuildTimeSaved.known == 1 and
+              (.netEstimatedBuildTimeSaved.milliseconds | type) == "number" and
+              ([.outcomes[] | select(
+                .integration == "actions" and .result == "hit" and .source == "localCache" and
+                (.producerDurationMs | type) == "number" and .bytes.downloaded > 0
+              )] | length) == 1
+            ' <<<"$warm_report"
+          }
+          exercise_actions_cache \
+            "$GITHUB_WORKSPACE/action/cache/node_modules/@actions/cache/lib/cache.js" current
+          exercise_actions_cache \
+            "$GITHUB_WORKSPACE/qa/fixtures/actions-cache-minimum/node_modules/@actions/cache/lib/cache.js" minimum
+
+          cleanup_daemon
+          trap - EXIT
+
+      - name: Verify the checked-in GitHub Action bundle
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        working-directory: action/cache
+        run: pnpm check
+
+      - name: Seed an installed runtime for the real GitHub Action
+        id: action-runtime
+        env:
+          LAYER_CACHE_BIN: ${{ github.workspace }}/dist/${{ matrix.artifact }}
+          QA_ROOT: ${{ runner.temp }}/layercache-action-runner
+        run: |
+          set -euo pipefail
+          CONFIG="$QA_ROOT/config.json"
+          mkdir -p "$QA_ROOT"
+          "$LAYER_CACHE_BIN" setup \
+            --config "$CONFIG" \
+            --data-dir "$QA_ROOT/data" \
+            --listen 127.0.0.1:18437 \
+            --role team \
+            --project "github.com/$GITHUB_REPOSITORY" \
+            --actions-repository "$GITHUB_REPOSITORY" \
+            --actions-ref "$GITHUB_REF" \
+            --actions-default-ref refs/heads/main \
+            --max-size 1073741824 \
+            --min-free-bytes 0 \
+            --non-interactive --json
+          "$LAYER_CACHE_BIN" start --config "$CONFIG" --json
+          TOKEN="$(jq -r '.localToken' "$CONFIG")"
+          COMPATIBILITY="$(jq -r '.compatibilityId' "$CONFIG")"
+          PROJECT="$(jq -r '.projectId' "$CONFIG")"
+          echo "::add-mask::$TOKEN"
+          {
+            echo "compatibility=$COMPATIBILITY"
+            echo "config=$CONFIG"
+            echo "project=$PROJECT"
+          } >> "$GITHUB_OUTPUT"
+          env -u ACTIONS_CACHE_SERVICE_V2 \
+            ACTIONS_CACHE_URL="http://127.0.0.1:18437/_layercache/compatibility/$COMPATIBILITY/" \
+            ACTIONS_RUNTIME_TOKEN="$TOKEN" \
+            node qa/stock-actions-cache.mjs save "$GITHUB_WORKSPACE" \
+              "official-action-${{ github.run_id }}-${{ github.run_attempt }}"
+          rm -rf .fixture-cache
+
+      - name: Restore through the checked-in Layer Cache action on an official runner
+        uses: ./action/cache
+        with:
+          endpoint: http://127.0.0.1:18437
+          project: ${{ steps.action-runtime.outputs.project }}
+          compatibility: ${{ steps.action-runtime.outputs.compatibility }}
+          public-cache-mode: disabled
+          path: .fixture-cache
+          key: official-action-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+
+      - name: Verify the official-runner action restore
+        run: test "$(cat .fixture-cache/value.txt)" = "restored by stock actions/cache"
+
+      - name: Stop the action QA runtime
+        if: always()
+        env:
+          LAYER_CACHE_BIN: ${{ github.workspace }}/dist/${{ matrix.artifact }}
+          CONFIG: ${{ steps.action-runtime.outputs.config }}
+        run: |
+          if test -n "$CONFIG"; then
+            "$LAYER_CACHE_BIN" stop --config "$CONFIG" --json || true
+          fi
+
+      - name: Set up the native candidate through the runner action
+        id: setup-runtime
+        uses: ./action/setup
+        with:
+          binary: ${{ github.workspace }}/dist/${{ matrix.artifact }}
+          max-size: '104857600'
+
+      - name: Verify setup exports and scoped cache access in a later step
+        env:
+          ENDPOINT: ${{ steps.setup-runtime.outputs.endpoint }}
+          COMPATIBILITY: ${{ steps.setup-runtime.outputs.compatibility }}
+        run: |
+          test "$TURBO_API" = "$ENDPOINT"
+          test -n "$TURBO_TOKEN"
+          test -f "$LAYER_CACHE_CONFIG"
+          curl --fail --silent --show-error --request PUT \
+            --header "Authorization: Bearer $TURBO_TOKEN" \
+            --header "x-layercache-compatibility: $COMPATIBILITY" \
+            --data 'setup-native-payload' "$ENDPOINT/v8/artifacts/setup-native" >/dev/null
+          test "$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $TURBO_TOKEN" \
+            --header "x-layercache-compatibility: $COMPATIBILITY" \
+            "$ENDPOINT/v8/artifacts/setup-native")" = 'setup-native-payload'
+
+      - name: Exercise a real Docker Buildx local-cache hit
+        if: matrix.goos == 'linux'
+        env:
+          LAYER_CACHE_BIN: ${{ github.workspace }}/dist/${{ matrix.artifact }}
+          QA_ROOT: ${{ runner.temp }}/layercache-buildx-current
+          BUILDX_PLATFORM: linux/${{ matrix.goarch }}
+          BUILDER: layercache-release-${{ github.run_id }}-${{ github.run_attempt }}
+          IMAGE: layercache-release-qa:${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./qa/client-versions.json').buildx.current.version")" = "0.36.1"
+          docker buildx version | grep -F 'v0.36.1'
+          qa/buildx-client-smoke.sh
+
+      - name: Package and checksum release candidate
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+        working-directory: dist
+        run: |
+          tar -czf "$ARTIFACT.tar.gz" "$ARTIFACT"
+          shasum -a 256 "$ARTIFACT.tar.gz" > "$ARTIFACT.tar.gz.sha256"
+
+      - name: Attest binary and package provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.tar.gz
+            dist/${{ matrix.artifact }}.tar.gz.sha256
+
+      - name: Upload release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/${{ matrix.artifact }}.tar.gz
+            dist/${{ matrix.artifact }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  buildx-minimum:
+    name: Buildx minimum client QA / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-latest
+            goarch: amd64
+            uname: x86_64
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            goarch: arm64
+            uname: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.13"
+          cache: false
+
+      - name: Build and exercise the installed candidate
+        env:
+          LAYER_CACHE_BIN: ${{ runner.temp }}/layercache-buildx-minimum
+          QA_ROOT: ${{ runner.temp }}/layercache-buildx-minimum-qa
+          DOCKER_CONFIG: ${{ runner.temp }}/layercache-buildx-minimum-docker-config
+          BUILDX_PLATFORM: linux/${{ matrix.goarch }}
+          BUILDER: layercache-buildx-minimum-${{ matrix.goarch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          IMAGE: layercache-buildx-minimum-${{ matrix.goarch }}:${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "${{ matrix.uname }}"
+          VERSION="$(jq -r '.buildx.minimum.version' qa/client-versions.json)"
+          SHA256="$(jq -r '.buildx.minimum.sha256["linux-${{ matrix.goarch }}"]' qa/client-versions.json)"
+          test "$VERSION" = "0.21.3"
+          qa/install-buildx-client.sh "$VERSION" "$SHA256" "$DOCKER_CONFIG"
+          docker buildx version | grep -F 'v0.21.3'
+          go build -trimpath -buildvcs=true -o "$LAYER_CACHE_BIN" ./cmd/layercache
+          qa/buildx-client-smoke.sh
+
+  cloud-persistence:
+    name: Cloud persistence QA / Linux x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      LAYER_CACHE_QA_POSTGRES_URL: postgres://layercache:layercache-release@127.0.0.1:5432/layercache?sslmode=disable
+      LAYERCACHE_MEASUREMENT_POSTGRES_URL: postgres://layercache:layercache-release@127.0.0.1:5432/layercache?sslmode=disable
+      LAYER_CACHE_QA_S3_ENDPOINT: http://127.0.0.1:19000
+      LAYER_CACHE_QA_S3_BUCKET: layercache-release-qa
+      LAYER_CACHE_QA_S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: layercache-release
+      AWS_SECRET_ACCESS_KEY: layercache-release-secret
+      MINIO_ROOT_USER: layercache-release
+      MINIO_ROOT_PASSWORD: layercache-release-secret
+      MINIO_CONTAINER: layercache-release-minio-${{ github.run_id }}-${{ github.run_attempt }}
+    services:
+      postgres:
+        image: postgres@sha256:e17e86066e5ef83e0952a9347f5c792b7ece00972e2aa787a6986f471b3dd3d5
+        env:
+          POSTGRES_USER: layercache
+          POSTGRES_PASSWORD: layercache-release
+          POSTGRES_DB: layercache
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U layercache -d layercache"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.13"
+          cache: false
+
+      - name: Require the Linux x64 release architecture
+        run: test "$(uname -m)" = x86_64
+
+      - name: Start isolated MinIO service
+        run: |
+          set -euo pipefail
+          docker run --detach --rm \
+            --name "$MINIO_CONTAINER" \
+            --publish 127.0.0.1:19000:9000 \
+            --env MINIO_ROOT_USER \
+            --env MINIO_ROOT_PASSWORD \
+            quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            server /data
+          for _ in {1..30}; do
+            if curl --fail --silent \
+              "$LAYER_CACHE_QA_S3_ENDPOINT/minio/health/ready" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error \
+            "$LAYER_CACHE_QA_S3_ENDPOINT/minio/health/ready" >/dev/null
+          export MC_HOST_qa="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@127.0.0.1:9000"
+          docker run --rm \
+            --network "container:$MINIO_CONTAINER" \
+            --env MC_HOST_qa \
+            minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727 \
+            mb --ignore-existing "qa/$LAYER_CACHE_QA_S3_BUCKET"
+
+      - name: Exercise PostgreSQL and S3 cloud persistence under the race detector
+        run: |
+          set -euo pipefail
+          go test -race ./internal/cloud \
+            -run 'TestConcurrentCloudSchemaMigrationAgainstPostgres|TestConfiguredMembershipReconciliationAgainstPostgres|TestCloudStoreAgainstPostgresAndS3|TestCloudQuotaAdministrationAgainstPostgresAndS3|TestCloudImpactRetentionAgainstPostgresAndS3' \
+            -count=1 -timeout=15m -v
+          go test -race ./internal/server -run TestCloudCacheAdministrationHTTPAgainstPostgresAndS3 -count=1 -timeout=10m -v
+
+      - name: Exercise PostgreSQL measurement persistence under the race detector
+        run: |
+          set -euo pipefail
+          go test -race ./internal/measurement \
+            -run 'TestConcurrentPostgresRepositoryInitializationAgainstPostgres|TestPostgresRepositoryAgainstPostgres' \
+            -count=1 -timeout=10m -v
+
+      - name: Exercise the PostgreSQL Public Build coordinator under the race detector
+        run: |
+          set -euo pipefail
+          go test -race ./internal/publicbuild \
+            -run 'TestPostgresCoordinatorMultiInstanceLifecycle|TestPostgresCoordinatorRecoversExpiredLeaseAndPreservesLiveLeaseOnReopen' \
+            -count=1 -timeout=10m -v
+
+      - name: Install a fresh cloud release candidate
+        env:
+          CANDIDATE: ${{ runner.temp }}/layercache-cloud-candidate
+          INSTALL_DIR: ${{ runner.temp }}/layercache-cloud-bin
+        run: |
+          set -euo pipefail
+          go build -trimpath -buildvcs=true -o "$CANDIDATE" ./cmd/layercache
+          mkdir -p "$INSTALL_DIR"
+          install -m 0755 "$CANDIDATE" "$INSTALL_DIR/layercache"
+          test -x "$INSTALL_DIR/layercache"
+          "$INSTALL_DIR/layercache" help >/dev/null
+
+      - name: Smoke Team Turbo and Actions persistence through a restart
+        env:
+          LAYER_CACHE_BIN: ${{ runner.temp }}/layercache-cloud-bin/layercache
+          QA_ROOT: ${{ runner.temp }}/layercache-cloud-smoke
+          QA_URL: http://127.0.0.1:19437
+          QA_COMPATIBILITY: linux-amd64-node24
+          QA_TEAM_TOKEN: layercache-release-team-token
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$QA_ROOT"
+          CONFIG="$QA_ROOT/config.json"
+          LOCAL_TOKEN_FILE="$QA_ROOT/local-token"
+          POSTGRES_URL_FILE="$QA_ROOT/postgres-url"
+          printf '%s\n' "$QA_TEAM_TOKEN" >"$LOCAL_TOKEN_FILE"
+          printf '%s\n' "$LAYER_CACHE_QA_POSTGRES_URL" >"$POSTGRES_URL_FILE"
+          chmod 0600 "$LOCAL_TOKEN_FILE" "$POSTGRES_URL_FILE"
+
+          "$LAYER_CACHE_BIN" setup --non-interactive --json \
+            --config "$CONFIG" \
+            --data-dir "$QA_ROOT/data" \
+            --role team \
+            --listen 127.0.0.1:19437 \
+            --project github.com/acme/release-cloud \
+            --compatibility-id "$QA_COMPATIBILITY" \
+            --local-token-file "$LOCAL_TOKEN_FILE" \
+            --max-size 10485760 \
+            --min-free-bytes 0 \
+            --buildkit-gc-bytes 1048576 \
+            --actions-repository acme/release-cloud \
+            --actions-ref refs/heads/main \
+            --actions-default-ref refs/heads/main \
+            --team-member qa-admin=admin \
+            --cloud-postgres-url-file "$POSTGRES_URL_FILE" \
+            --cloud-s3-endpoint "$LAYER_CACHE_QA_S3_ENDPOINT" \
+            --cloud-s3-bucket "$LAYER_CACHE_QA_S3_BUCKET" \
+            --cloud-s3-region "$LAYER_CACHE_QA_S3_REGION" \
+            --cloud-s3-path-style >"$QA_ROOT/setup.json"
+
+          cleanup_runtime() {
+            "$LAYER_CACHE_BIN" stop --config "$CONFIG" --json >/dev/null 2>&1 || true
+          }
+          trap cleanup_runtime EXIT
+          "$LAYER_CACHE_BIN" start --config "$CONFIG" --json >"$QA_ROOT/start.json"
+
+          AUTHORIZATION="Authorization: Bearer $QA_TEAM_TOKEN"
+          TURBO_KEY="release-cloud-turbo-${{ github.run_id }}-${{ github.run_attempt }}"
+          ACTIONS_KEY="release-cloud-actions-${{ github.run_id }}-${{ github.run_attempt }}"
+          ACTIONS_BASE="$QA_URL/_layercache/compatibility/$QA_COMPATIBILITY/_apis/artifactcache"
+          printf '%s' 'turbo-cloud-release' >"$QA_ROOT/turbo-input"
+          printf '%s' 'actions-cloud-release' >"$QA_ROOT/actions-input"
+
+          status_json="$(curl --fail --silent --show-error \
+            --header "$AUTHORIZATION" "$QA_URL/v1/status")"
+          jq -e '.running == true and .storageBackend == "postgresql+s3"' <<<"$status_json"
+
+          curl --fail --silent --show-error --request PUT \
+            --header "$AUTHORIZATION" \
+            --header "x-layercache-compatibility: $QA_COMPATIBILITY" \
+            --header 'x-artifact-duration: 1234' \
+            --data-binary @"$QA_ROOT/turbo-input" \
+            "$QA_URL/v8/artifacts/$TURBO_KEY" >/dev/null
+          curl --fail --silent --show-error \
+            --header "$AUTHORIZATION" \
+            --header "x-layercache-compatibility: $QA_COMPATIBILITY" \
+            "$QA_URL/v8/artifacts/$TURBO_KEY" >"$QA_ROOT/turbo-first-restore"
+          cmp "$QA_ROOT/turbo-input" "$QA_ROOT/turbo-first-restore"
+
+          actions_size="$(wc -c <"$QA_ROOT/actions-input" | tr -d ' ')"
+          reserve_body="$(jq -cn \
+            --arg key "$ACTIONS_KEY" --argjson size "$actions_size" \
+            '{key:$key,version:"v1",cacheSize:$size}')"
+          cache_id="$(curl --fail --silent --show-error --request POST \
+            --header "$AUTHORIZATION" \
+            --header 'Content-Type: application/json' \
+            --data "$reserve_body" \
+            "$ACTIONS_BASE/caches" | jq -er '.cacheId')"
+          test "$cache_id" -gt 0
+          curl --fail --silent --show-error --request PATCH \
+            --header "$AUTHORIZATION" \
+            --header "Content-Range: bytes 0-$((actions_size - 1))/*" \
+            --data-binary @"$QA_ROOT/actions-input" \
+            "$ACTIONS_BASE/caches/$cache_id" >/dev/null
+          curl --fail --silent --show-error --request POST \
+            --header "$AUTHORIZATION" \
+            --header 'Content-Type: application/json' \
+            --data "$(jq -cn --argjson size "$actions_size" '{size:$size}')" \
+            "$ACTIONS_BASE/caches/$cache_id" >/dev/null
+
+          restore_actions() {
+            destination="$1"
+            archive_url="$(curl --fail --silent --show-error \
+              --header "$AUTHORIZATION" \
+              "$ACTIONS_BASE/cache?keys=$ACTIONS_KEY&version=v1" | jq -er '.archiveLocation')"
+            curl --fail --silent --show-error "$archive_url" >"$destination"
+            cmp "$QA_ROOT/actions-input" "$destination"
+          }
+          restore_actions "$QA_ROOT/actions-first-restore"
+
+          cleanup_runtime
+          "$LAYER_CACHE_BIN" start --config "$CONFIG" --json >"$QA_ROOT/restart.json"
+          status_json="$(curl --fail --silent --show-error \
+            --header "$AUTHORIZATION" "$QA_URL/v1/status")"
+          jq -e '.running == true and .storageBackend == "postgresql+s3"' <<<"$status_json"
+          curl --fail --silent --show-error \
+            --header "$AUTHORIZATION" \
+            --header "x-layercache-compatibility: $QA_COMPATIBILITY" \
+            "$QA_URL/v8/artifacts/$TURBO_KEY" >"$QA_ROOT/turbo-restart-restore"
+          cmp "$QA_ROOT/turbo-input" "$QA_ROOT/turbo-restart-restore"
+          restore_actions "$QA_ROOT/actions-restart-restore"
+
+          cleanup_runtime
+          trap - EXIT
+
+      - name: Stop the isolated MinIO service
+        if: always()
+        run: docker rm --force "$MINIO_CONTAINER" >/dev/null 2>&1 || true
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [public-build-qualification, lint, performance, native, buildx-minimum, cloud-persistence]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download native release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify release checksums
+        working-directory: dist
+        run: sha256sum --check --strict ./*.sha256
+
+      - name: Publish the verified immutable tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          TRUSTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          resolve_remote_tag() {
+            local depth object_json object_sha object_type
+
+            object_json="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG")"
+            object_sha="$(jq -er '.object.sha' <<<"$object_json")"
+            object_type="$(jq -er '.object.type' <<<"$object_json")"
+
+            for depth in {1..16}; do
+              case "$object_type" in
+                commit)
+                  printf '%s\n' "$object_sha"
+                  return 0
+                  ;;
+                tag)
+                  object_json="$(gh api "repos/$GH_REPO/git/tags/$object_sha")"
+                  object_sha="$(jq -er '.object.sha' <<<"$object_json")"
+                  object_type="$(jq -er '.object.type' <<<"$object_json")"
+                  ;;
+                *)
+                  echo "release tag resolves to unsupported Git object type: $object_type" >&2
+                  return 1
+                  ;;
+              esac
+            done
+
+            echo "release tag did not peel to a commit after $depth objects" >&2
+            return 1
+          }
+
+          require_trusted_tag() {
+            local resolved_sha
+
+            resolved_sha="$(resolve_remote_tag)"
+            if [[ "$resolved_sha" != "$TRUSTED_SHA" ]]; then
+              echo "release tag moved: expected $TRUSTED_SHA, got $resolved_sha" >&2
+              return 1
+            fi
+          }
+
+          require_trusted_tag
+          gh release create "$TAG" dist/* \
+            --draft --verify-tag --generate-notes --title "$TAG"
+
+          # Draft creation and asset upload are separate API operations. Check the
+          # tag again after both have finished and immediately before publication.
+          require_trusted_tag
+          gh release edit "$TAG" --draft=false --verify-tag
+
+          release_json="$(gh api "repos/$GH_REPO/releases/tags/$TAG")"
+          jq -e --arg tag "$TAG" '
+            .tag_name == $tag and
+            .draft == false and
+            .immutable == true
+          ' <<<"$release_json" >/dev/null
+
+          # Once GitHub reports the release immutable, its tag is locked. This
+          # final peel proves the locked tag is the commit tested by this run.
+          require_trusted_tag

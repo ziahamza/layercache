@@ -57,8 +57,24 @@ func runLayerCache(t *testing.T, args ...string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commandArgs := append([]string{"run", "./cmd/layercache"}, args...)
-	cmd := exec.Command("go", commandArgs...)
+	var cmd *exec.Cmd
+	if candidate := os.Getenv("LAYERCACHE_ACCEPTANCE_BINARY"); candidate != "" {
+		candidate, err = filepath.Abs(candidate)
+		if err != nil {
+			t.Fatalf("resolve LAYERCACHE_ACCEPTANCE_BINARY: %v", err)
+		}
+		info, statErr := os.Stat(candidate)
+		if statErr != nil {
+			t.Fatalf("inspect LAYERCACHE_ACCEPTANCE_BINARY %s: %v", candidate, statErr)
+		}
+		if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("LAYERCACHE_ACCEPTANCE_BINARY %s is not an executable file", candidate)
+		}
+		cmd = exec.Command(candidate, args...)
+	} else {
+		commandArgs := append([]string{"run", "./cmd/layercache"}, args...)
+		cmd = exec.Command("go", commandArgs...)
+	}
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "NO_COLOR=1")
 	output, err := cmd.CombinedOutput()

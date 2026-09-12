@@ -26,11 +26,12 @@ func TestPlanBuildUsesPlatformScopedNativeCaches(t *testing.T) {
 		ContextPath:    ".",
 		TargetPlatform: "linux/amd64",
 		TeamImportTags: []string{"feature", "main"},
-		TeamExportID:   "01k5abc123",
+		TeamExportID:   "01k5abc123-u0123456789abcdef0123456789abcdef",
 		PublicImports: []buildkit.PublicCache{
 			{
-				Repository: "cache.example/public/widget",
-				Digest:     publicDigest,
+				Repository:     "cache.example/public/widget",
+				Digest:         publicDigest,
+				PublicIdentity: strings.Repeat("b", 64),
 			},
 		},
 		Output:    buildkit.OutputPush,
@@ -50,7 +51,7 @@ func TestPlanBuildUsesPlatformScopedNativeCaches(t *testing.T) {
 			"--cache-from", "type=registry,ref=cache.example/team/acme/widget/linux-amd64:feature",
 			"--cache-from", "type=registry,ref=cache.example/team/acme/widget/linux-amd64:main",
 			"--cache-from", "type=registry,ref=cache.example/public/widget/linux-amd64@" + publicDigest,
-			"--cache-to", "type=registry,ref=cache.example/team/acme/widget/linux-amd64:build-01k5abc123,mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true",
+			"--cache-to", "type=registry,ref=cache.example/team/acme/widget/linux-amd64:build-01k5abc123-u0123456789abcdef0123456789abcdef,mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true",
 			"--push",
 			"--tag", "registry.example/widget:commit",
 			".",
@@ -58,6 +59,38 @@ func TestPlanBuildUsesPlatformScopedNativeCaches(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plan.Command, want) {
 		t.Fatalf("unexpected build command\n got: %#v\nwant: %#v", plan.Command, want)
+	}
+}
+
+func TestPlanAddsSerializedPromotionAfterUniqueTeamExport(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := buildkit.New(buildkit.Config{
+		BuilderName:    "layercache",
+		TeamRepository: "cache.example/team/acme/widget",
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	exportID := "run-123-u0123456789abcdef0123456789abcdef"
+	plan, err := adapter.Plan(buildkit.BuildRequest{
+		ContextPath: ".", TargetPlatform: "linux/arm64", Output: buildkit.OutputPush,
+		TeamExportID: exportID, TeamPromoteTag: "feature-branch",
+	})
+	if err != nil {
+		t.Fatalf("plan build: %v", err)
+	}
+	if plan.Promotion == nil {
+		t.Fatal("plan did not include Team Cache promotion")
+	}
+	want := buildkit.Command{Path: "docker", Args: []string{
+		"buildx", "imagetools", "create", "--builder", "layercache",
+		"--prefer-index=false", "--progress=plain", "--tag",
+		"cache.example/team/acme/widget/linux-arm64:feature-branch",
+		"cache.example/team/acme/widget/linux-arm64:build-" + exportID,
+	}}
+	if !reflect.DeepEqual(*plan.Promotion, want) {
+		t.Fatalf("promotion command\n got: %#v\nwant: %#v", *plan.Promotion, want)
 	}
 }
 
@@ -73,12 +106,48 @@ func TestPlanRejectsPublicCacheWithoutSHA256Digest(t *testing.T) {
 		ContextPath:    ".",
 		TargetPlatform: "linux/amd64",
 		PublicImports: []buildkit.PublicCache{
-			{Repository: "cache.example/public/widget", Digest: "latest"},
+			{Repository: "cache.example/public/widget", Digest: "latest", PublicIdentity: strings.Repeat("b", 64)},
 		},
 		Output: buildkit.OutputLoad,
 	})
 	if err == nil || !strings.Contains(err.Error(), "SHA-256 digest") {
 		t.Fatalf("expected a digest-pinning error, got %v", err)
+	}
+}
+
+func TestPlanRejectsPublicCacheWithoutSignedPublicationIdentity(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := buildkit.New(buildkit.Config{BuilderName: "layercache"})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	_, err = adapter.Plan(buildkit.BuildRequest{
+		ContextPath: ".", TargetPlatform: "linux/amd64", Output: buildkit.OutputLoad,
+		PublicImports: []buildkit.PublicCache{{
+			Repository: "cache.example/public/widget", Digest: "sha256:" + strings.Repeat("a", 64),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "signed publication identity") {
+		t.Fatalf("expected a signed-publication identity error, got %v", err)
+	}
+}
+
+func TestPlanRejectsPromotionWithoutImmutableExport(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := buildkit.New(buildkit.Config{
+		BuilderName: "layercache", TeamRepository: "cache.example/team/acme/widget",
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	_, err = adapter.Plan(buildkit.BuildRequest{
+		ContextPath: ".", TargetPlatform: "linux/amd64", Output: buildkit.OutputLoad,
+		TeamPromoteTag: "main",
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires an immutable") {
+		t.Fatalf("expected promotion-without-export error, got %v", err)
 	}
 }
 
@@ -178,7 +247,7 @@ func TestPlanRejectsUnsafeTeamCacheReferenceParts(t *testing.T) {
 		{
 			ContextPath:    ".",
 			TargetPlatform: "linux/amd64",
-			TeamExportID:   "shared,ignore-error=false",
+			TeamExportID:   "shared,ignore-error=false-u0123456789abcdef0123456789abcdef",
 			Output:         buildkit.OutputLoad,
 		},
 	}
@@ -226,8 +295,9 @@ func TestPlanRejectsCacheRepositoriesThatInjectCSVOptions(t *testing.T) {
 		TargetPlatform: "linux/amd64",
 		PublicImports: []buildkit.PublicCache{
 			{
-				Repository: "cache.example/public/widget,mode=min",
-				Digest:     "sha256:" + strings.Repeat("a", 64),
+				Repository:     "cache.example/public/widget,mode=min",
+				Digest:         "sha256:" + strings.Repeat("a", 64),
+				PublicIdentity: strings.Repeat("b", 64),
 			},
 		},
 		Output: buildkit.OutputLoad,

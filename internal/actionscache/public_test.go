@@ -1,7 +1,9 @@
 package actionscache_test
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -19,7 +21,151 @@ import (
 	"github.com/layercache/layercache/internal/publictrust"
 )
 
-func TestPublicStorageReturnsOnlyFullyVerifiedExactArchives(t *testing.T) {
+func TestPublicCacheIndexRejectsUnsafeArchiveMembersBeforeRestore(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
+	for _, test := range []struct {
+		name                 string
+		member               string
+		absoluteSymlink      bool
+		nonDirectoryAncestor bool
+		ancestorLast         bool
+		sparseMetadata       bool
+		wantMiss             bool
+	}{
+		{name: "workspace file", member: "node_modules/pkg/index.js"},
+		{name: "parent traversal", member: "../../.ssh/authorized_keys", wantMiss: true},
+		{name: "absolute path", member: "/tmp/layercache-escape", wantMiss: true},
+		{name: "absolute symlink target", absoluteSymlink: true, wantMiss: true},
+		{name: "file ancestor before child", nonDirectoryAncestor: true, wantMiss: true},
+		{name: "file ancestor after child", nonDirectoryAncestor: true, ancestorLast: true, wantMiss: true},
+		{name: "sparse file metadata", sparseMetadata: true, wantMiss: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var body []byte
+			switch {
+			case test.absoluteSymlink:
+				body = gzipTarWithAbsoluteSymlink(t)
+			case test.nonDirectoryAncestor:
+				body = gzipTarWithNonDirectoryAncestor(t, test.ancestorLast)
+			case test.sparseMetadata:
+				body = gzipTarWithSparseMetadata(t)
+			default:
+				body = gzipTarArchive(t, test.member, []byte("content"))
+			}
+			resolver := &signedPublicResolver{privateKey: privateKey, now: now, archives: map[publicArchiveCoordinate][]byte{
+				{ref: scope.Ref, key: "safe-members", version: "v1"}: body,
+			}}
+			storage, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
+				VerificationKey: publicKey, StagingDirectory: t.TempDir(), RequireSafeArchive: true,
+				Now: func() time.Time { return now.Add(time.Hour) },
+			}, resolver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer storage.Close()
+			_, err = storage.Lookup(context.Background(), actionscache.LookupRequest{
+				Scope: scope, Keys: []string{"safe-members"}, Version: "v1",
+			})
+			if test.wantMiss && err == nil {
+				t.Fatal("unsafe signed archive became visible")
+			}
+			if !test.wantMiss && err != nil {
+				t.Fatalf("safe signed archive was rejected: %v", err)
+			}
+		})
+	}
+}
+
+func gzipTarWithSparseMetadata(t *testing.T) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	compressor := gzip.NewWriter(&encoded)
+	archive := tar.NewWriter(compressor)
+	header := &tar.Header{
+		Name:       "node_modules/pkg/sparse.bin",
+		Mode:       0o644,
+		Size:       1,
+		Typeflag:   tar.TypeReg,
+		PAXRecords: map[string]string{"SCHILY.realsize": "1099511627776"},
+	}
+	if err := archive.WriteHeader(header); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write([]byte{'x'}); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
+
+func gzipTarWithAbsoluteSymlink(t *testing.T) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	compressor := gzip.NewWriter(&encoded)
+	archive := tar.NewWriter(compressor)
+	for _, header := range []*tar.Header{
+		{Name: "node_modules/pkg/etc/passwd", Mode: 0o644, Size: 7, Typeflag: tar.TypeReg},
+		{Name: "node_modules/pkg/link", Mode: 0o777, Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"},
+	} {
+		if err := archive.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if header.Typeflag == tar.TypeReg {
+			if _, err := archive.Write([]byte("content")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
+
+func gzipTarWithNonDirectoryAncestor(t *testing.T, ancestorLast bool) []byte {
+	t.Helper()
+	ancestor := &tar.Header{Name: "node_modules/pkg", Mode: 0o644, Size: 4, Typeflag: tar.TypeReg}
+	child := &tar.Header{Name: "node_modules/pkg/index.js", Mode: 0o644, Size: 5, Typeflag: tar.TypeReg}
+	headers := []*tar.Header{ancestor, child}
+	if ancestorLast {
+		headers = []*tar.Header{child, ancestor}
+	}
+	var encoded bytes.Buffer
+	compressor := gzip.NewWriter(&encoded)
+	archive := tar.NewWriter(compressor)
+	for _, header := range headers {
+		if err := archive.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := archive.Write(bytes.Repeat([]byte{'x'}, int(header.Size))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
+
+func TestPublicCacheIndexReturnsOnlyFullyVerifiedExactArchives(t *testing.T) {
 	t.Parallel()
 
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -31,7 +177,7 @@ func TestPublicStorageReturnsOnlyFullyVerifiedExactArchives(t *testing.T) {
 	resolver := &signedPublicResolver{privateKey: privateKey, now: now, archives: map[publicArchiveCoordinate][]byte{
 		{ref: "refs/heads/feature", key: "pnpm-linux", version: "v1"}: body,
 	}}
-	storage, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	storage, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey:  publicKey,
 		StagingDirectory: t.TempDir(),
 		Now:              func() time.Time { return now.Add(time.Hour) },
@@ -41,10 +187,7 @@ func TestPublicStorageReturnsOnlyFullyVerifiedExactArchives(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = storage.Close() })
 
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/feature",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/feature", "refs/heads/main", "linux-amd64-node24")
 	result, err := storage.Lookup(context.Background(), actionscache.LookupRequest{
 		Scope: scope, Keys: []string{"pnpm-linux", "pnpm-"}, Version: "v1",
 	})
@@ -65,18 +208,9 @@ func TestPublicStorageReturnsOnlyFullyVerifiedExactArchives(t *testing.T) {
 		t.Fatalf("archive = %q, read error = %v, close error = %v", got, readErr, closeErr)
 	}
 
-	if _, err := storage.Reserve(context.Background(), actionscache.ReserveRequest{}); !errors.Is(err, actionscache.ErrReadOnly) {
-		t.Fatalf("Public Cache reserve error = %v, want ErrReadOnly", err)
-	}
-	if err := storage.Upload(context.Background(), actionscache.UploadRequest{}); !errors.Is(err, actionscache.ErrReadOnly) {
-		t.Fatalf("Public Cache upload error = %v, want ErrReadOnly", err)
-	}
-	if _, err := storage.Commit(context.Background(), actionscache.CommitRequest{}); !errors.Is(err, actionscache.ErrReadOnly) {
-		t.Fatalf("Public Cache commit error = %v, want ErrReadOnly", err)
-	}
 }
 
-func TestPublicStorageRejectsTamperedBytesAndWrongSignedIdentity(t *testing.T) {
+func TestPublicCacheIndexRejectsTamperedBytesAndWrongSignedIdentity(t *testing.T) {
 	t.Parallel()
 
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -84,10 +218,7 @@ func TestPublicStorageRejectsTamperedBytesAndWrongSignedIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	request := actionscache.LookupRequest{Scope: scope, Keys: []string{"pnpm-linux"}, Version: "v1"}
 
 	tests := []struct {
@@ -124,7 +255,7 @@ func TestPublicStorageRejectsTamperedBytesAndWrongSignedIdentity(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			storage, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+			storage, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 				VerificationKey: publicKey, StagingDirectory: t.TempDir(), Now: func() time.Time { return now.Add(time.Hour) },
 			}, publicResolverFunc(test.resolution))
 			if err != nil {
@@ -138,7 +269,7 @@ func TestPublicStorageRejectsTamperedBytesAndWrongSignedIdentity(t *testing.T) {
 	}
 }
 
-func TestPublicStorageRejectsSignedOversizeBeforeReadingArchive(t *testing.T) {
+func TestPublicCacheIndexRejectsSignedOversizeBeforeReadingArchive(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +290,7 @@ func TestPublicStorageRejectsSignedOversizeBeforeReadingArchive(t *testing.T) {
 		}
 		return resolution, nil
 	})
-	storage, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	storage, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: t.TempDir(),
 		ArtifactStore: artifacts, Now: func() time.Time { return now.Add(time.Hour) },
 	}, resolver)
@@ -167,10 +298,7 @@ func TestPublicStorageRejectsSignedOversizeBeforeReadingArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer storage.Close()
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	_, err = storage.Lookup(ctx, actionscache.LookupRequest{Scope: scope, Keys: []string{"oversize"}, Version: "v1"})
 	if !errors.Is(err, artifact.ErrStagingQuota) {
 		t.Fatalf("oversize Public Cache error = %v, want artifact.ErrStagingQuota", err)
@@ -198,14 +326,11 @@ func TestPublicWarmReleasesVerifiedStagingBeforeLocalCommitAssembly(t *testing.T
 		t.Fatal(err)
 	}
 	defer local.Close()
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	resolver := &signedPublicResolver{privateKey: privateKey, now: now, archives: map[publicArchiveCoordinate][]byte{
 		{ref: scope.Ref, key: "full-size", version: "v1"}: []byte("1234"),
 	}}
-	public, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	public, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: filepath.Join(root, "public"),
 		ArtifactStore: artifacts, Now: func() time.Time { return now.Add(time.Hour) },
 	}, resolver)
@@ -232,7 +357,7 @@ func TestPublicWarmReleasesVerifiedStagingBeforeLocalCommitAssembly(t *testing.T
 	}
 }
 
-func TestPublicStorageUsesExactCurrentThenDefaultRefIdentityOrderAndScopesOpen(t *testing.T) {
+func TestPublicCacheIndexUsesOnlyExactPrimaryKeyOnCurrentRef(t *testing.T) {
 	t.Parallel()
 
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -241,27 +366,33 @@ func TestPublicStorageUsesExactCurrentThenDefaultRefIdentityOrderAndScopesOpen(t
 	}
 	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
 	resolver := &signedPublicResolver{privateKey: privateKey, now: now, archives: map[publicArchiveCoordinate][]byte{
-		{ref: "refs/heads/main", key: "restore-secondary", version: "v7"}: []byte("default-ref exact archive"),
+		{ref: "refs/heads/main", key: "restore-primary", version: "v7"}: []byte("default-ref exact archive"),
 	}}
-	storage, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	storage, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: t.TempDir(), Now: func() time.Time { return now.Add(time.Hour) },
 	}, resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = storage.Close() })
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/feature",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
-	result, err := storage.Lookup(context.Background(), actionscache.LookupRequest{
+	scope := publicScope("acme/widgets", "refs/heads/feature", "refs/heads/main", "linux-amd64-node24")
+	lookup := actionscache.LookupRequest{
 		Scope: scope, Keys: []string{"restore-primary", "restore-secondary"}, Version: "v7",
-	})
+	}
+	if _, err := storage.Lookup(context.Background(), lookup); !errors.Is(err, actionscache.ErrNotFound) {
+		t.Fatalf("default-ref-only Public lookup error = %v, want ErrNotFound", err)
+	}
+	resolver.mu.Lock()
+	resolver.archives[publicArchiveCoordinate{
+		ref: "refs/heads/feature", key: "restore-primary", version: "v7",
+	}] = []byte("current-ref exact archive")
+	resolver.mu.Unlock()
+	result, err := storage.Lookup(context.Background(), lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.RefScope != actionscache.RefScopeDefault || result.RequestedKey != "restore-secondary" || result.Match != actionscache.MatchExact {
-		t.Fatalf("result = %#v, want second ordered key on default ref", result)
+	if result.RefScope != actionscache.RefScopeCurrent || result.RequestedKey != "restore-primary" || result.Match != actionscache.MatchExact {
+		t.Fatalf("result = %#v, want exact primary key on current ref", result)
 	}
 
 	resolver.mu.Lock()
@@ -269,14 +400,11 @@ func TestPublicStorageUsesExactCurrentThenDefaultRefIdentityOrderAndScopesOpen(t
 	resolver.mu.Unlock()
 	wantCoordinates := []publicArchiveCoordinate{
 		{ref: "refs/heads/feature", key: "restore-primary", version: "v7"},
-		{ref: "refs/heads/feature", key: "restore-secondary", version: "v7"},
-		{ref: "refs/heads/main", key: "restore-primary", version: "v7"},
-		{ref: "refs/heads/main", key: "restore-secondary", version: "v7"},
+		{ref: "refs/heads/feature", key: "restore-primary", version: "v7"},
 	}
 	if len(requests) != len(wantCoordinates) {
 		t.Fatalf("resolve requests = %d, want %d", len(requests), len(wantCoordinates))
 	}
-	identities := make(map[string]struct{}, len(requests))
 	for index, request := range requests {
 		want := wantCoordinates[index]
 		if request.Repository != scope.Repository || request.Compatibility != scope.Compatibility ||
@@ -286,10 +414,6 @@ func TestPublicStorageUsesExactCurrentThenDefaultRefIdentityOrderAndScopesOpen(t
 		if request.SourceRepository != "https://github.com/acme/widgets" {
 			t.Fatalf("source repository = %q, want canonical GitHub URL", request.SourceRepository)
 		}
-		if _, duplicate := identities[request.Identity]; duplicate {
-			t.Fatalf("distinct exact coordinate reused public identity %q", request.Identity)
-		}
-		identities[request.Identity] = struct{}{}
 	}
 
 	wrongScope := scope
@@ -305,7 +429,7 @@ func TestPublicStorageUsesExactCurrentThenDefaultRefIdentityOrderAndScopesOpen(t
 	}
 }
 
-func TestPublicStorageFailsClosedForMalformedOrHostQualifiedActionsRepository(t *testing.T) {
+func TestPublicCacheIndexFailsClosedForMalformedOrHostQualifiedActionsRepository(t *testing.T) {
 	t.Parallel()
 
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
@@ -316,7 +440,7 @@ func TestPublicStorageFailsClosedForMalformedOrHostQualifiedActionsRepository(t 
 		t.Fatal("resolver called for repository namespace without safe provenance derivation")
 		return actionscache.PublicResolution{}, nil
 	})
-	storage, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	storage, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: t.TempDir(),
 	}, resolver)
 	if err != nil {
@@ -333,10 +457,8 @@ func TestPublicStorageFailsClosedForMalformedOrHostQualifiedActionsRepository(t 
 	} {
 		t.Run(repository, func(t *testing.T) {
 			_, err := storage.Lookup(context.Background(), actionscache.LookupRequest{
-				Scope: actionscache.Scope{
-					Repository: repository, Ref: "refs/heads/main", DefaultRef: "refs/heads/main", Compatibility: "linux-amd64",
-				},
-				Keys: []string{"cache-key"}, Version: "v1",
+				Scope: publicScope(repository, "refs/heads/main", "refs/heads/main", "linux-amd64"),
+				Keys:  []string{"cache-key"}, Version: "v1",
 			})
 			if !errors.Is(err, actionscache.ErrNotFound) {
 				t.Fatalf("lookup error = %v, want safe Public Cache miss", err)
@@ -345,7 +467,7 @@ func TestPublicStorageFailsClosedForMalformedOrHostQualifiedActionsRepository(t 
 	}
 }
 
-func TestPublicStorageUsesExplicitCanonicalGHESSourceRepository(t *testing.T) {
+func TestPublicCacheIndexUsesExplicitCanonicalGHESSourceRepository(t *testing.T) {
 	t.Parallel()
 
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
@@ -356,7 +478,7 @@ func TestPublicStorageUsesExplicitCanonicalGHESSourceRepository(t *testing.T) {
 	resolver := &signedPublicResolver{privateKey: privateKey, now: now, archives: map[publicArchiveCoordinate][]byte{
 		{ref: "refs/heads/main", key: "cache-key", version: "v1"}: []byte("GHES archive"),
 	}}
-	storage, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	storage, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: t.TempDir(),
 		SourceRepository: "https://GitHub.Corp.Example/acme/widgets.git",
 		Now:              func() time.Time { return now.Add(time.Hour) },
@@ -366,10 +488,8 @@ func TestPublicStorageUsesExplicitCanonicalGHESSourceRepository(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = storage.Close() })
 	_, err = storage.Lookup(context.Background(), actionscache.LookupRequest{
-		Scope: actionscache.Scope{
-			Repository: "acme/widgets", Ref: "refs/heads/main", DefaultRef: "refs/heads/main", Compatibility: "linux-amd64",
-		},
-		Keys: []string{"cache-key"}, Version: "v1",
+		Scope: publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64"),
+		Keys:  []string{"cache-key"}, Version: "v1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -390,10 +510,7 @@ func TestCacheHierarchyChoosesStrongerPublicMatchWarmsLocalAndNeverPublishesPubl
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/feature",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/feature", "refs/heads/main", "linux-amd64-node24")
 	local := actionscache.NewMemoryStorage()
 	putArchive(t, local, scope, "restore-primary-old", "v1", []byte("local prefix"))
 	team := actionscache.NewMemoryStorage()
@@ -402,7 +519,7 @@ func TestCacheHierarchyChoosesStrongerPublicMatchWarmsLocalAndNeverPublishesPubl
 	resolver := &signedPublicResolver{privateKey: privateKey, now: now, archives: map[publicArchiveCoordinate][]byte{
 		{ref: scope.Ref, key: "restore-primary", version: "v1"}: publicBody,
 	}}
-	public, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	public, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: t.TempDir(), Now: func() time.Time { return now.Add(time.Hour) },
 	}, resolver)
 	if err != nil {
@@ -456,6 +573,45 @@ func TestCacheHierarchyChoosesStrongerPublicMatchWarmsLocalAndNeverPublishesPubl
 	}
 }
 
+func TestWarmedPublicEntryCannotMatchRestoreKey(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
+	local := actionscache.NewMemoryStorage()
+	resolver := &signedPublicResolver{privateKey: privateKey, now: now, archives: map[publicArchiveCoordinate][]byte{
+		{ref: scope.Ref, key: "public-exact", version: "v1"}: []byte("public archive"),
+	}}
+	public, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
+		VerificationKey: publicKey, StagingDirectory: t.TempDir(), Now: func() time.Time { return now.Add(time.Hour) },
+	}, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hierarchy, err := actionscache.NewCacheChainWithPublic(local, nil, public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact := actionscache.LookupRequest{Scope: scope, Keys: []string{"public-exact"}, Version: "v1"}
+	if _, err := hierarchy.Lookup(context.Background(), exact); err != nil {
+		t.Fatal(err)
+	}
+	if err := public.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restoreKey := actionscache.LookupRequest{
+		Scope: scope, Keys: []string{"different-primary", "public-exact"}, Version: "v1",
+	}
+	if _, err := hierarchy.Lookup(context.Background(), restoreKey); !errors.Is(err, actionscache.ErrNotFound) {
+		t.Fatalf("warmed Public entry restore-key lookup error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestCacheHierarchyConcurrentPublicHitsExposeOneCompleteLocalArchive(t *testing.T) {
 	t.Parallel()
 
@@ -464,16 +620,13 @@ func TestCacheHierarchyConcurrentPublicHitsExposeOneCompleteLocalArchive(t *test
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	want := bytes.Repeat([]byte("complete-public-archive-"), 1024)
 	resolver := &signedPublicResolver{
 		privateKey: privateKey, now: now, delay: 40 * time.Millisecond,
 		archives: map[publicArchiveCoordinate][]byte{{ref: scope.Ref, key: "concurrent", version: "v1"}: want},
 	}
-	public, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+	public, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 		VerificationKey: publicKey, StagingDirectory: t.TempDir(), Now: func() time.Time { return now.Add(time.Hour) },
 	}, resolver)
 	if err != nil {
@@ -532,6 +685,88 @@ func TestCacheHierarchyConcurrentPublicHitsExposeOneCompleteLocalArchive(t *test
 	}
 }
 
+func TestCacheHierarchyNeverSharesConcurrentPublicBytesAcrossSourceCommits(t *testing.T) {
+	t.Parallel()
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
+	firstScope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
+	firstScope.SourceCommit = "1111111111111111111111111111111111111111"
+	secondScope := firstScope
+	secondScope.SourceCommit = "2222222222222222222222222222222222222222"
+	resolver := &signedPublicResolver{
+		privateKey: privateKey, now: now, delay: 30 * time.Millisecond,
+		archives: map[publicArchiveCoordinate][]byte{
+			{ref: firstScope.Ref, key: "same-native-key", version: "v1", sourceCommit: firstScope.SourceCommit}:   []byte("first-commit-bytes"),
+			{ref: secondScope.Ref, key: "same-native-key", version: "v1", sourceCommit: secondScope.SourceCommit}: []byte("second-commit-bytes"),
+		},
+	}
+	public, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
+		VerificationKey: publicKey, StagingDirectory: t.TempDir(), Now: func() time.Time { return now.Add(time.Hour) },
+	}, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = public.Close() })
+	hierarchy, err := actionscache.NewCacheChainWithPublic(actionscache.NewMemoryStorage(), nil, public)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type outcome struct {
+		want []byte
+		got  []byte
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan outcome, 2)
+	for _, candidate := range []struct {
+		scope actionscache.Scope
+		want  []byte
+	}{{firstScope, []byte("first-commit-bytes")}, {secondScope, []byte("second-commit-bytes")}} {
+		candidate := candidate
+		go func() {
+			<-start
+			result, lookupErr := hierarchy.Lookup(context.Background(), actionscache.LookupRequest{
+				Scope: candidate.scope, Keys: []string{"same-native-key"}, Version: "v1",
+			})
+			if lookupErr != nil {
+				results <- outcome{want: candidate.want, err: lookupErr}
+				return
+			}
+			archive, openErr := hierarchy.Open(context.Background(), actionscache.OpenRequest{Scope: candidate.scope, ID: result.Entry.ID})
+			if openErr != nil {
+				results <- outcome{want: candidate.want, err: openErr}
+				return
+			}
+			got, readErr := io.ReadAll(archive.Body)
+			_ = archive.Body.Close()
+			results <- outcome{want: candidate.want, got: got, err: readErr}
+		}()
+	}
+	close(start)
+	succeeded := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			if !errors.Is(result.err, actionscache.ErrNotFound) {
+				t.Fatalf("concurrent distinct-provenance lookup failed unsafely: %v", result.err)
+			}
+			continue
+		}
+		succeeded++
+		if !bytes.Equal(result.got, result.want) {
+			t.Fatalf("lookup restored %q, want bytes for its own source commit %q", result.got, result.want)
+		}
+	}
+	if succeeded == 0 {
+		t.Fatal("both concurrent valid Public lookups missed")
+	}
+}
+
 func TestCacheHierarchyUsesCacheOrderOnlyToBreakEqualNativeMatches(t *testing.T) {
 	t.Parallel()
 
@@ -540,10 +775,7 @@ func TestCacheHierarchyUsesCacheOrderOnlyToBreakEqualNativeMatches(t *testing.T)
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC)
-	scope := actionscache.Scope{
-		Repository: "acme/widgets", Ref: "refs/heads/main",
-		DefaultRef: "refs/heads/main", Compatibility: "linux-amd64-node24",
-	}
+	scope := publicScope("acme/widgets", "refs/heads/main", "refs/heads/main", "linux-amd64-node24")
 	lookup := actionscache.LookupRequest{Scope: scope, Keys: []string{"same-native-match"}, Version: "v1"}
 
 	for _, test := range []struct {
@@ -565,7 +797,7 @@ func TestCacheHierarchyUsesCacheOrderOnlyToBreakEqualNativeMatches(t *testing.T)
 			resolver := &signedPublicResolver{privateKey: privateKey, now: now, archives: map[publicArchiveCoordinate][]byte{
 				{ref: scope.Ref, key: "same-native-match", version: "v1"}: []byte("public"),
 			}}
-			public, err := actionscache.NewPublicStorage(actionscache.PublicStorageConfig{
+			public, err := actionscache.NewPublicCacheIndex(actionscache.PublicCacheConfig{
 				VerificationKey: publicKey, StagingDirectory: t.TempDir(), Now: func() time.Time { return now.Add(time.Hour) },
 			}, resolver)
 			if err != nil {
@@ -594,9 +826,10 @@ func TestCacheHierarchyUsesCacheOrderOnlyToBreakEqualNativeMatches(t *testing.T)
 }
 
 type publicArchiveCoordinate struct {
-	ref     string
-	key     string
-	version string
+	ref          string
+	key          string
+	version      string
+	sourceCommit string
 }
 
 type signedPublicResolver struct {
@@ -632,7 +865,7 @@ func (resolver *signedPublicResolver) Resolve(ctx context.Context, request actio
 	resolver.mu.Lock()
 	resolver.requests = append(resolver.requests, request)
 	resolver.mu.Unlock()
-	body, found := resolver.archives[publicArchiveCoordinate{ref: request.Ref, key: request.Key, version: request.Version}]
+	body, found := resolver.archive(request)
 	if !found {
 		return actionscache.PublicResolution{}, publictrust.ErrNotFound
 	}
@@ -644,11 +877,22 @@ func (resolver *signedPublicResolver) Resolve(ctx context.Context, request actio
 }
 
 func (resolver *signedPublicResolver) Revalidate(_ context.Context, request actionscache.PublicResolveRequest) (publictrust.Envelope, error) {
-	body, found := resolver.archives[publicArchiveCoordinate{ref: request.Ref, key: request.Key, version: request.Version}]
+	body, found := resolver.archive(request)
 	if !found {
 		return publictrust.Envelope{}, publictrust.ErrNotFound
 	}
 	return signPublicTestEnvelope(resolver.privateKey, resolver.now, request, body)
+}
+
+func (resolver *signedPublicResolver) archive(request actionscache.PublicResolveRequest) ([]byte, bool) {
+	body, found := resolver.archives[publicArchiveCoordinate{
+		ref: request.Ref, key: request.Key, version: request.Version, sourceCommit: request.SourceCommit,
+	}]
+	if found {
+		return body, true
+	}
+	body, found = resolver.archives[publicArchiveCoordinate{ref: request.Ref, key: request.Key, version: request.Version}]
+	return body, found
 }
 
 func signPublicTestEnvelope(
@@ -661,11 +905,12 @@ func signPublicTestEnvelope(
 	publication := publictrust.Publication{
 		Integration: request.Expected.Integration, Project: request.Expected.Project,
 		Compatibility: request.Expected.Compatibility, NativeKey: request.Expected.NativeKey,
-		Repository: request.SourceRepository, Commit: "0123456789abcdef0123456789abcdef01234567",
-		RecipeDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Platform:     "linux/amd64", Toolchain: "actions/cache@v5",
-		Builder: "layercache-public-builder@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		Digest:  hex.EncodeToString(digest[:]), Size: int64(len(body)), DurationMS: 500,
+		Repository: request.SourceRepository, Commit: request.SourceCommit,
+		RecipeDigest: request.RecipeDigest, Target: request.Target,
+		Platform: request.Platform, Inputs: append([]publictrust.DeclaredInput(nil), request.Expected.Inputs...),
+		Toolchain: request.Toolchain, Builder: request.Builder,
+		BuilderImageDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Digest:             hex.EncodeToString(digest[:]), Size: int64(len(body)), DurationMS: 500,
 		BuildID: "build-123", IssuedAt: now, ExpiresAt: now.Add(24 * time.Hour),
 	}
 	return publictrust.Sign(privateKey, publication)
@@ -685,11 +930,12 @@ func signedResolution(
 	publication := publictrust.Publication{
 		Integration: request.Expected.Integration, Project: request.Expected.Project,
 		Compatibility: request.Expected.Compatibility, NativeKey: request.Expected.NativeKey,
-		Repository: request.SourceRepository, Commit: "0123456789abcdef0123456789abcdef01234567",
-		RecipeDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Platform:     "linux/amd64", Toolchain: "actions/cache@v5",
-		Builder: "layercache-public-builder@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		Digest:  hex.EncodeToString(digest[:]), Size: int64(len(signedBody)), DurationMS: 500,
+		Repository: request.SourceRepository, Commit: request.SourceCommit,
+		RecipeDigest: request.RecipeDigest, Target: request.Target,
+		Platform: request.Platform, Inputs: append([]publictrust.DeclaredInput(nil), request.Expected.Inputs...),
+		Toolchain: request.Toolchain, Builder: request.Builder,
+		BuilderImageDigest: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Digest:             hex.EncodeToString(digest[:]), Size: int64(len(signedBody)), DurationMS: 500,
 		BuildID: "build-123", IssuedAt: now, ExpiresAt: now.Add(24 * time.Hour),
 	}
 	if mutate != nil {
@@ -700,4 +946,34 @@ func signedResolution(
 		t.Fatal(err)
 	}
 	return actionscache.PublicResolution{Envelope: envelope, Archive: io.NopCloser(bytes.NewReader(servedBody))}
+}
+
+func publicScope(repository, ref, defaultRef, compatibility string) actionscache.Scope {
+	return actionscache.Scope{
+		Repository: repository, Ref: ref, DefaultRef: defaultRef, Compatibility: compatibility,
+		SourceCommit: "0123456789abcdef0123456789abcdef01234567",
+		RecipeDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Target:       ".github/workflows/public-cache.yml#public-cache", Platform: "linux/amd64", Toolchain: "actions/cache@v5",
+		Builder: "layercache-public-builder@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+}
+
+func gzipTarArchive(t *testing.T, name string, body []byte) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	compressor := gzip.NewWriter(&encoded)
+	archive := tar.NewWriter(compressor)
+	if err := archive.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
 }

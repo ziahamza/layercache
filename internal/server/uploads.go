@@ -100,9 +100,10 @@ func (server *Server) enqueuePinnedTurboUpload(ctx context.Context, prepared pre
 	}
 	result, err := server.uploads.Enqueue(ctx, prepared.request)
 	if err != nil {
-		if errors.Is(err, uploadqueue.ErrQueueFull) || errors.Is(err, uploadqueue.ErrConflict) {
-			server.releaseTurboUploadPin(prepared.pin.Owner)
-		}
+		// The pin is owned by this enqueue attempt until a durable queue row
+		// exists. Any failure, including cancellation or SQLite errors, must
+		// release it so the artifact remains evictable.
+		server.releaseTurboUploadPin(prepared.pin.Owner)
 		return err
 	}
 	if result.Job.State == uploadqueue.StateCompleted {
@@ -256,7 +257,9 @@ func (server *Server) processUpload(lease uploadqueue.Lease) {
 	}
 	team := server.team
 	if compatibilityID != server.config.CompatibilityID {
-		team, err = remote.NewTurboClientForCompatibility(server.config.TeamURL, server.config.TeamToken, compatibilityID)
+		team, err = remote.NewTurboClientForCompatibilityWithTimeouts(server.config.TeamURL, server.currentTeamToken(), compatibilityID, remote.Timeouts{
+			Metadata: server.config.RemoteMetadataTimeout, TransferIdle: server.config.RemoteTransferIdleTimeout,
+		})
 		if err != nil {
 			server.retryUpload(lease, "identity_invalid")
 			return

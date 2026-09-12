@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/layercache/layercache/internal/config"
+	"github.com/layercache/layercache/internal/publicbuild"
 )
 
 func runPublic(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -20,6 +21,10 @@ func runPublic(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return errors.New("a public command is required")
 	}
 	switch args[0] {
+	case "trust-update":
+		return runTrustUpdate(ctx, args[1:], stdout, stderr)
+	case "trust-sign":
+		return runTrustSign(args[1:], stdout, stderr)
 	case "trust-key":
 		return runPublicTrustKey(args[1:], stdout, stderr)
 	case "publish":
@@ -59,13 +64,13 @@ func runPublicRevoke(ctx context.Context, args []string, stdout, stderr io.Write
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+cfg.Listen+"/v1/public/revoke", strings.NewReader(string(body)))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, localRuntimeURL(cfg.Listen)+"/v1/public/revoke", strings.NewReader(string(body)))
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+cfg.PublisherToken)
+	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := newCLIHTTPClient(controlRequestTimeout).Do(request)
+	response, err := newLocalCLIHTTPClient(controlRequestTimeout).Do(request)
 	if err != nil {
 		return fmt.Errorf("revoke Public Cache artifact: %w", err)
 	}
@@ -113,23 +118,50 @@ func runPublicPublish(ctx context.Context, args []string, stdout, stderr io.Writ
 	commit := flags.String("commit", "", "immutable source commit")
 	recipe := flags.String("recipe", "", "recipe digest")
 	platform := flags.String("platform", "", "target platform")
+	compatibility := flags.String("compatibility", "", "exact Public Build compatibility identity (defaults to this configuration)")
+	target := flags.String("target", "", "named Public Build recipe target")
 	toolchain := flags.String("toolchain", "", "toolchain identity")
 	builder := flags.String("builder", "", "builder identity")
+	builderImageDigest := flags.String("builder-image-digest", "", "reviewed immutable guest image digest")
 	buildID := flags.String("build-id", "", "Public Build identity")
+	workerID := flags.String("worker-id", "", "worker identity that owns the live Public Build lease")
+	leaseToken := flags.String("lease-token", "", "live Public Build lease token (prefer --lease-token-file)")
+	leaseTokenFile := flags.String("lease-token-file", "", "owner-only file containing the live Public Build lease token")
 	duration := flags.Int64("duration", 0, "producer duration in milliseconds")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *filePath == "" || *hash == "" {
-		return errors.New("--file and --hash are required")
+	leaseTokenSet, err := resolveSecretFlag(flags, "lease-token", "lease-token-file", leaseToken, *leaseTokenFile)
+	if err != nil {
+		return err
+	}
+	if *filePath == "" || *hash == "" || *workerID == "" || !leaseTokenSet || *leaseToken == "" {
+		return errors.New("--file, --hash, --worker-id, and one of --lease-token or --lease-token-file are required")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
 	}
-	if cfg.Role != "public" || cfg.PublisherToken == "" {
-		return errors.New("configuration is not a Public Cache publisher")
+	if cfg.Role != "public" || cfg.PublicCollectorToken == "" {
+		return errors.New("configuration has no trusted Public Cache collector credential")
+	}
+	if *builderImageDigest == "" && cfg.PublicBuildKernelSHA256 != "" &&
+		cfg.PublicBuildRootFSSHA256 != "" && cfg.PublicBuildContractSHA256 != "" {
+		*builderImageDigest, err = publicbuild.BuilderImageDigest(
+			cfg.PublicBuildKernelSHA256,
+			cfg.PublicBuildRootFSSHA256,
+			cfg.PublicBuildContractSHA256,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if err := publicbuild.ValidateBuilderImageDigest(*builderImageDigest); err != nil {
+		return fmt.Errorf("invalid --builder-image-digest: %w", err)
+	}
+	if *compatibility == "" {
+		*compatibility = cfg.CompatibilityID
 	}
 	file, err := os.Open(*filePath)
 	if err != nil {
@@ -140,25 +172,29 @@ func runPublicPublish(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err != nil {
 		return fmt.Errorf("inspect public artifact: %w", err)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+cfg.Listen+"/v1/public/publish", file)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, localRuntimeURL(cfg.Listen)+"/v1/public/publish", file)
 	if err != nil {
 		return err
 	}
 	request.ContentLength = info.Size()
-	request.Header.Set("Authorization", "Bearer "+cfg.PublisherToken)
+	request.Header.Set("Authorization", "Bearer "+cfg.PublicCollectorToken)
 	request.Header.Set("x-layercache-integration", "turbo")
 	request.Header.Set("x-layercache-project", cfg.ProjectID)
-	request.Header.Set("x-layercache-compatibility", cfg.CompatibilityID)
+	request.Header.Set("x-layercache-compatibility", *compatibility)
 	request.Header.Set("x-layercache-native-key", *hash)
 	request.Header.Set("x-layercache-repository", *repository)
 	request.Header.Set("x-layercache-commit", *commit)
 	request.Header.Set("x-layercache-recipe", *recipe)
 	request.Header.Set("x-layercache-platform", *platform)
+	request.Header.Set("x-layercache-target", *target)
 	request.Header.Set("x-layercache-toolchain", *toolchain)
 	request.Header.Set("x-layercache-builder", *builder)
+	request.Header.Set("x-layercache-builder-image-digest", *builderImageDigest)
 	request.Header.Set("x-layercache-build-id", *buildID)
+	request.Header.Set("x-layercache-worker-id", *workerID)
+	request.Header.Set("x-layercache-lease-token", *leaseToken)
 	request.Header.Set("x-layercache-duration", strconv.FormatInt(*duration, 10))
-	response, err := newCLIHTTPClient(publishRequestTimeout).Do(request)
+	response, err := newLocalCLIHTTPClient(publishRequestTimeout).Do(request)
 	if err != nil {
 		return fmt.Errorf("publish Public Cache artifact: %w", err)
 	}

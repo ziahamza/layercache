@@ -15,10 +15,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  performance:
+    name: Cache performance
+    uses: ./.github/workflows/performance.yml
+
+  lint:
+    name: Workflow and shell checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.25.13"
+          cache: false
+      - name: Install pinned lint tools
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          curl --fail --silent --show-error --location \
+            https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz \
+            --output "$RUNNER_TEMP/shellcheck.tar.xz"
+          echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum --check --strict
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-v0.10.0" >> "$GITHUB_PATH"
+      - name: Check workflows, shell scripts, and whitespace
+        run: bash qa/lint.sh
+
   linux-go:
     name: Go / Linux x64
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      LAYER_CACHE_QA_POSTGRES_URL: postgres://layercache:layercache@127.0.0.1:5432/layercache?sslmode=disable
+      LAYERCACHE_MEASUREMENT_POSTGRES_URL: postgres://layercache:layercache@127.0.0.1:5432/layercache?sslmode=disable
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: layercache
+          POSTGRES_PASSWORD: layercache
+          POSTGRES_USER: layercache
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U layercache -d layercache"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -26,7 +69,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.25.4"
+          go-version: "1.25.13"
           cache: false
 
       - name: Require native x64 runner
@@ -62,7 +105,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.25.4"
+          go-version: "1.25.13"
           cache: false
 
       - name: Require native arm64 runner
@@ -91,7 +134,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: "1.25.4"
+          go-version: "1.25.13"
           cache: false
 
       - name: Require native arm64 runner
@@ -136,3 +179,7 @@ jobs:
           git ls-files --error-unmatch dist/main/index.js dist/main/package.json dist/post/index.js dist/post/package.json
           git diff --exit-code -- dist
           test -z "$(git status --porcelain --untracked-files=all -- dist)"
+
+      - name: Test installer and runner setup
+        working-directory: .
+        run: node --test action/setup/setup.test.mjs scripts/install.test.mjs

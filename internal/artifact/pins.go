@@ -12,10 +12,10 @@ import (
 // Pin keeps one complete Local Cache entry available while its owner still
 // needs the bytes. Namespace lets each subsystem reconcile only its own pins.
 type Pin struct {
-	Owner  string
-	Key    Key
-	Digest string
-	Size   int64
+	Owner  string `json:"owner"`
+	Key    Key    `json:"key"`
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
 }
 
 func (store *Store) Pin(ctx context.Context, namespace string, pin Pin) error {

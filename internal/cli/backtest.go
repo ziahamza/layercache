@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/layercache/layercache/internal/measurement"
+	"github.com/layercache/layercache/internal/retention"
 )
 
 const maxBacktestInputBytes = 32 << 20
@@ -51,7 +52,9 @@ func runBacktest(_ context.Context, args []string, stdout, stderr io.Writer) err
 	flags := flag.NewFlagSet("backtest", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	inputPath := flags.String("input", "", "historical run JSON file")
-	retention := flags.Duration("retention", 0, "cache retention duration")
+	retentionWindow := flags.Duration("retention", 0, "cache retention duration")
+	maxBytes := flags.Int64("max-bytes", 0, "cache byte quota (zero means unbounded)")
+	evictionPolicy := flags.String("eviction-policy", "lru", "cache eviction policy: lru or impact")
 	sourceValue := flags.String("source", "", "hit source: localCache, teamCache, publicCache, or unattributed")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	if err := flags.Parse(args); err != nil {
@@ -73,7 +76,9 @@ func runBacktest(_ context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	report, err := measurement.Backtest(history, measurement.BacktestPolicy{Retention: *retention, HitSource: source})
+	report, err := measurement.Backtest(history, measurement.BacktestPolicy{
+		Retention: *retentionWindow, HitSource: source, MaxBytes: *maxBytes, EvictionPolicy: retention.Policy(*evictionPolicy),
+	})
 	if err != nil {
 		return err
 	}
@@ -116,7 +121,7 @@ func readBacktestInput(path string) ([]measurement.HistoricalRun, error) {
 		}
 		return nil, fmt.Errorf("decode backtest input: %w", err)
 	}
-	if input.SchemaVersion != measurement.SchemaVersion {
+	if input.SchemaVersion != "1" && input.SchemaVersion != measurement.SchemaVersion {
 		return nil, fmt.Errorf("unsupported backtest input schemaVersion %q", input.SchemaVersion)
 	}
 	history := make([]measurement.HistoricalRun, len(input.Runs))

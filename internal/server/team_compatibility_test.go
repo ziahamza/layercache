@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/layercache/layercache/internal/access"
 	"github.com/layercache/layercache/internal/actionscache"
 	"github.com/layercache/layercache/internal/artifact"
 	"github.com/layercache/layercache/internal/compatibility"
@@ -63,6 +65,69 @@ func TestTeamTurboUsesAuthenticatedClientCompatibility(t *testing.T) {
 	}
 }
 
+func TestLocalTurboUsesCapabilityCompatibilityWithoutASelectorHeader(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Version: 1, Role: "local", DataDir: t.TempDir(), Listen: "127.0.0.1:7437",
+		MaxBytes: 1 << 20, ProjectID: "github.com/acme/widget", LocalToken: "local-token",
+		CompatibilityID: "linux-amd64-host-schema1", ActionsRepository: "acme/widget",
+		ActionsRef: "refs/heads/main", ActionsDefaultRef: "refs/heads/main",
+		BuildkitBuilder: "layercache-test",
+	}
+	instance, err := server.New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = instance.Close() })
+	endpoint := httptest.NewServer(instance.Handler())
+	t.Cleanup(endpoint.Close)
+
+	now := time.Now().UTC()
+	token, err := access.MintCapabilityToken(cfg.LocalToken, access.Claims{
+		Subject: "vm-route:test", Project: cfg.ProjectID, Integration: "turbo",
+		Compatibility: "linux-arm64-vm-schema1",
+		Capabilities:  []access.Capability{access.CapabilityWrite},
+		ExpiresAt:     now.Add(time.Minute),
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	put := authenticatedRequest(t, token, http.MethodPut,
+		endpoint.URL+"/v8/artifacts/vm-output", strings.NewReader("arm output"))
+	response, err := http.DefaultClient.Do(put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
+		t.Fatalf("VM capability publication status = %d", response.StatusCode)
+	}
+
+	get := authenticatedRequest(t, token, http.MethodGet, endpoint.URL+"/v8/artifacts/vm-output", nil)
+	response, err = http.DefaultClient.Do(get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || readErr != nil || string(restored) != "arm output" {
+		t.Fatalf("VM capability restore status = %d, body = %q, err = %v", response.StatusCode, restored, readErr)
+	}
+
+	host := authenticatedRequest(t, cfg.LocalToken, http.MethodGet,
+		endpoint.URL+"/v8/artifacts/vm-output", nil)
+	response, err = http.DefaultClient.Do(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("host compatibility lookup status = %d, want 404", response.StatusCode)
+	}
+}
+
 func TestTeamActionsUsesAuthenticatedClientCompatibility(t *testing.T) {
 	t.Parallel()
 
@@ -112,6 +177,11 @@ func TestTeamActionsUsesAuthenticatedClientCompatibility(t *testing.T) {
 	response, err := http.DefaultClient.Do(lookup)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("path-scoped lookup status = %d, want 200: %s", response.StatusCode, body)
 	}
 	var lookupBody struct {
 		ArchiveLocation string `json:"archiveLocation"`
@@ -166,8 +236,8 @@ func TestTeamCompatibilitySelectorDoesNotAuthorizeRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("selector-only status = %d, want 401", response.StatusCode)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("selector-only lookup status = %d, want an indistinguishable miss", response.StatusCode)
 	}
 }
 

@@ -3,20 +3,35 @@ package measurement
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/layercache/layercache/internal/retention"
 )
 
-const SchemaVersion = "1"
+const SchemaVersion = "2"
 
-var ErrRunNotFound = errors.New("measurement run not found")
+var (
+	ErrRunNotFound         = errors.New("measurement run not found")
+	ErrActionsMissNotFound = errors.New("Actions miss outcome not found")
+)
 
 type Result string
 
 const (
-	ResultHit  Result = "hit"
-	ResultMiss Result = "miss"
+	ResultHit     Result = "hit"
+	ResultMiss    Result = "miss"
+	ResultUnknown Result = "unknown"
+)
+
+type Integration string
+
+const (
+	IntegrationTurbo    Integration = "turbo"
+	IntegrationActions  Integration = "actions"
+	IntegrationBuildkit Integration = "buildkit"
 )
 
 type Source string
@@ -53,6 +68,8 @@ type Bytes struct {
 
 type FinalOutcome struct {
 	RunID             string
+	WorkspaceID       string
+	Integration       Integration
 	WorkID            string
 	Dependencies      []string
 	ArtifactID        string
@@ -66,6 +83,23 @@ type FinalOutcome struct {
 	Timing            Timing
 	Bytes             Bytes
 	Degraded          bool
+	// EligibleUnits and HitUnits let one BuildKit vertex group retain its
+	// native cached-vertex ratio. Zero values mean one binary unit, preserving
+	// the task/archive model used by Turbo and Actions.
+	EligibleUnits int
+	HitUnits      int
+}
+
+// ActionsMissCompletion contains the bounded measurements observed when a
+// cache save completes after an Actions lookup miss. It carries no cache key,
+// path, environment value, credential, or artifact contents.
+type ActionsMissCompletion struct {
+	RunID             string
+	WorkID            string
+	FinishedAt        time.Time
+	ExecutionDuration time.Duration
+	UploadDuration    time.Duration
+	UploadedBytes     int64
 }
 
 type Estimate struct {
@@ -86,6 +120,8 @@ type TimingReport struct {
 
 type OutcomeReport struct {
 	WorkID              string       `json:"workId"`
+	WorkspaceID         string       `json:"workspaceId,omitempty"`
+	Integration         Integration  `json:"integration,omitempty"`
 	Dependencies        []string     `json:"dependencies,omitempty"`
 	ArtifactID          string       `json:"artifactId,omitempty"`
 	CompatibilityID     string       `json:"compatibilityId,omitempty"`
@@ -98,6 +134,8 @@ type OutcomeReport struct {
 	Timing              TimingReport `json:"timing"`
 	Bytes               Bytes        `json:"bytes"`
 	Degraded            bool         `json:"degraded"`
+	EligibleUnits       int          `json:"eligibleUnits"`
+	HitUnits            int          `json:"hitUnits"`
 }
 
 type SourceReport struct {
@@ -107,39 +145,55 @@ type SourceReport struct {
 	Uploaded   int64  `json:"uploadedBytes"`
 }
 
+type IntegrationReport struct {
+	Integration Integration  `json:"integration"`
+	Groups      int          `json:"groups"`
+	Eligible    int          `json:"eligible"`
+	Hits        int          `json:"hits"`
+	Misses      int          `json:"misses"`
+	HitRate     float64      `json:"hitRate"`
+	Timing      TimingReport `json:"timing"`
+	Bytes       Bytes        `json:"bytes"`
+	Degraded    bool         `json:"degraded"`
+}
+
 type RunReport struct {
-	SchemaVersion              string          `json:"schemaVersion"`
-	RunID                      string          `json:"runId"`
-	StartedAt                  time.Time       `json:"startedAt"`
-	FinishedAt                 time.Time       `json:"finishedAt"`
-	Outcomes                   []OutcomeReport `json:"outcomes"`
-	Eligible                   int             `json:"eligible"`
-	Hits                       int             `json:"hits"`
-	Misses                     int             `json:"misses"`
-	HitRate                    float64         `json:"hitRate"`
-	GrossAvoidedTaskTime       Estimate        `json:"grossAvoidedTaskTime"`
-	NetEstimatedBuildTimeSaved Estimate        `json:"netEstimatedBuildTimeSaved"`
-	Timing                     TimingReport    `json:"timing"`
-	Bytes                      Bytes           `json:"bytes"`
-	Sources                    []SourceReport  `json:"sources"`
-	Degraded                   bool            `json:"degraded"`
+	SchemaVersion              string              `json:"schemaVersion"`
+	RunID                      string              `json:"runId"`
+	StartedAt                  time.Time           `json:"startedAt"`
+	FinishedAt                 time.Time           `json:"finishedAt"`
+	Outcomes                   []OutcomeReport     `json:"outcomes"`
+	Groups                     int                 `json:"groups"`
+	Eligible                   int                 `json:"eligible"`
+	Hits                       int                 `json:"hits"`
+	Misses                     int                 `json:"misses"`
+	HitRate                    float64             `json:"hitRate"`
+	GrossAvoidedTaskTime       Estimate            `json:"grossAvoidedTaskTime"`
+	NetEstimatedBuildTimeSaved Estimate            `json:"netEstimatedBuildTimeSaved"`
+	Timing                     TimingReport        `json:"timing"`
+	Bytes                      Bytes               `json:"bytes"`
+	Sources                    []SourceReport      `json:"sources"`
+	Integrations               []IntegrationReport `json:"integrations,omitempty"`
+	Degraded                   bool                `json:"degraded"`
 }
 
 type PeriodReport struct {
-	SchemaVersion              string         `json:"schemaVersion"`
-	From                       time.Time      `json:"from"`
-	To                         time.Time      `json:"to"`
-	Runs                       int            `json:"runs"`
-	Eligible                   int            `json:"eligible"`
-	Hits                       int            `json:"hits"`
-	Misses                     int            `json:"misses"`
-	HitRate                    float64        `json:"hitRate"`
-	GrossAvoidedTaskTime       Estimate       `json:"grossAvoidedTaskTime"`
-	NetEstimatedBuildTimeSaved Estimate       `json:"netEstimatedBuildTimeSaved"`
-	Timing                     TimingReport   `json:"timing"`
-	Bytes                      Bytes          `json:"bytes"`
-	Sources                    []SourceReport `json:"sources"`
-	Degraded                   bool           `json:"degraded"`
+	SchemaVersion              string              `json:"schemaVersion"`
+	From                       time.Time           `json:"from"`
+	To                         time.Time           `json:"to"`
+	Runs                       int                 `json:"runs"`
+	Groups                     int                 `json:"groups"`
+	Eligible                   int                 `json:"eligible"`
+	Hits                       int                 `json:"hits"`
+	Misses                     int                 `json:"misses"`
+	HitRate                    float64             `json:"hitRate"`
+	GrossAvoidedTaskTime       Estimate            `json:"grossAvoidedTaskTime"`
+	NetEstimatedBuildTimeSaved Estimate            `json:"netEstimatedBuildTimeSaved"`
+	Timing                     TimingReport        `json:"timing"`
+	Bytes                      Bytes               `json:"bytes"`
+	Sources                    []SourceReport      `json:"sources"`
+	Integrations               []IntegrationReport `json:"integrations,omitempty"`
+	Degraded                   bool                `json:"degraded"`
 }
 
 type HistoricalWork struct {
@@ -161,16 +215,25 @@ type HistoricalRun struct {
 }
 
 type BacktestPolicy struct {
-	Retention time.Duration
-	HitSource Source
+	Retention      time.Duration
+	HitSource      Source
+	MaxBytes       int64
+	EvictionPolicy retention.Policy
 }
 
 type BacktestReport struct {
-	SchemaVersion string       `json:"schemaVersion"`
-	Method        string       `json:"method"`
-	RetentionMS   int64        `json:"retentionMs"`
-	Runs          []RunReport  `json:"runs"`
-	Period        PeriodReport `json:"period"`
+	SchemaVersion        string           `json:"schemaVersion"`
+	Method               string           `json:"method"`
+	RetentionMS          int64            `json:"retentionMs"`
+	MaxBytes             int64            `json:"maxBytes"`
+	EvictionPolicy       retention.Policy `json:"evictionPolicy"`
+	ImpactEvictions      int              `json:"impactEvictions"`
+	LRUFallbackEvictions int              `json:"lruFallbackEvictions"`
+	TotalWork            int              `json:"totalWork"`
+	KnownFingerprints    int              `json:"knownFingerprints"`
+	FingerprintCoverage  float64          `json:"fingerprintCoverage"`
+	Runs                 []RunReport      `json:"runs"`
+	Period               PeriodReport     `json:"period"`
 }
 
 type Recorder struct {
@@ -197,6 +260,31 @@ func (recorder *Recorder) Record(outcome FinalOutcome) error {
 		return fmt.Errorf("run %q already has final outcome %q", outcome.RunID, outcome.WorkID)
 	}
 	work[outcome.WorkID] = cloneOutcome(outcome)
+	return nil
+}
+
+// EnrichActionsMiss completes one recorded Actions miss without creating a
+// second outcome for the later save.
+func (recorder *Recorder) EnrichActionsMiss(completion ActionsMissCompletion) error {
+	if err := validateActionsMissCompletion(completion); err != nil {
+		return err
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	work := recorder.runs[completion.RunID]
+	outcome, found := work[completion.WorkID]
+	if !found || outcome.Integration != IntegrationActions || outcome.Result != ResultMiss {
+		return actionsMissNotFound(completion)
+	}
+	if err := validateActionsMissCompletionOrder(outcome, completion); err != nil {
+		return err
+	}
+	executionDuration := completion.ExecutionDuration
+	outcome.FinishedAt = completion.FinishedAt
+	outcome.ExecutionDuration = &executionDuration
+	outcome.Timing.Upload = completion.UploadDuration
+	outcome.Bytes.Uploaded = completion.UploadedBytes
+	work[completion.WorkID] = outcome
 	return nil
 }
 
@@ -243,8 +331,16 @@ func (recorder *Recorder) PeriodReport(from, to time.Time) (PeriodReport, error)
 }
 
 func Backtest(history []HistoricalRun, policy BacktestPolicy) (BacktestReport, error) {
+	validatedPolicy, err := retention.Normalize(policy.EvictionPolicy)
+	if err != nil {
+		return BacktestReport{}, err
+	}
+	policy.EvictionPolicy = validatedPolicy
 	if policy.Retention < 0 {
 		return BacktestReport{}, errors.New("backtest retention cannot be negative")
+	}
+	if policy.MaxBytes < 0 {
+		return BacktestReport{}, errors.New("backtest cache quota cannot be negative")
 	}
 	if policy.HitSource == "" {
 		policy.HitSource = SourceUnattributed
@@ -263,10 +359,12 @@ func Backtest(history []HistoricalRun, policy BacktestPolicy) (BacktestReport, e
 		return BacktestReport{}, err
 	}
 	result := BacktestReport{
-		SchemaVersion: SchemaVersion,
-		Method:        "causalReplay",
-		RetentionMS:   policy.Retention.Milliseconds(),
-		Runs:          make([]RunReport, 0, len(runs)),
+		SchemaVersion:  SchemaVersion,
+		Method:         "causalReplay",
+		RetentionMS:    policy.Retention.Milliseconds(),
+		MaxBytes:       policy.MaxBytes,
+		EvictionPolicy: policy.EvictionPolicy,
+		Runs:           make([]RunReport, 0, len(runs)),
 	}
 	if len(runs) == 0 {
 		result.Period = aggregatePeriod(time.Time{}, time.Time{}, nil)
@@ -276,9 +374,22 @@ func Backtest(history []HistoricalRun, policy BacktestPolicy) (BacktestReport, e
 	cache := make(map[historicalKey]historicalArtifact)
 	pending := make([]pendingHistoricalArtifact, 0)
 	for _, historicalRun := range runs {
-		cache, pending = activateHistoricalArtifacts(cache, pending, historicalRun.StartedAt, policy.Retention)
+		var decisions replayEvictions
+		cache, pending, decisions = activateHistoricalArtifacts(cache, pending, historicalRun.StartedAt, policy)
+		result.ImpactEvictions += decisions.impact
+		result.LRUFallbackEvictions += decisions.fallback
 		outcomes := make([]FinalOutcome, 0, len(historicalRun.Work))
 		for _, work := range historicalRun.Work {
+			result.TotalWork++
+			if work.ArtifactID == "" || work.CompatibilityID == "" {
+				outcomes = append(outcomes, FinalOutcome{
+					RunID: historicalRun.RunID, WorkID: work.WorkID,
+					Result: ResultUnknown, Source: SourceUnattributed,
+					StartedAt: historicalRun.StartedAt, FinishedAt: historicalRun.FinishedAt,
+				})
+				continue
+			}
+			result.KnownFingerprints++
 			key := historicalKey{ArtifactID: work.ArtifactID, CompatibilityID: work.CompatibilityID}
 			artifact, hit := cache[key]
 			if hit && expired(artifact.LastAccess, historicalRun.StartedAt, policy.Retention) {
@@ -301,6 +412,7 @@ func Backtest(history []HistoricalRun, policy BacktestPolicy) (BacktestReport, e
 				outcome.Timing = work.HitTiming
 				outcome.Bytes.Downloaded = work.ArtifactBytes
 				artifact.LastAccess = historicalRun.StartedAt
+				artifact.AccessCount = min(artifact.AccessCount+1, retention.MaxAccessCount)
 				cache[key] = artifact
 			} else {
 				outcome.Result = ResultMiss
@@ -313,6 +425,8 @@ func Backtest(history []HistoricalRun, policy BacktestPolicy) (BacktestReport, e
 					Artifact: historicalArtifact{
 						ProducerDuration: cloneDuration(work.ExecutionDuration),
 						LastAccess:       historicalRun.FinishedAt,
+						CreatedAt:        historicalRun.FinishedAt,
+						Size:             work.ArtifactBytes,
 					},
 					AvailableAt: historicalRun.FinishedAt,
 				})
@@ -325,6 +439,9 @@ func Backtest(history []HistoricalRun, policy BacktestPolicy) (BacktestReport, e
 		}
 		result.Runs = append(result.Runs, report)
 	}
+	if result.TotalWork > 0 {
+		result.FingerprintCoverage = float64(result.KnownFingerprints) / float64(result.TotalWork)
+	}
 	result.Period = aggregatePeriod(runs[0].StartedAt, latestHistoryFinish(runs), result.Runs)
 	return result, nil
 }
@@ -332,6 +449,14 @@ func Backtest(history []HistoricalRun, policy BacktestPolicy) (BacktestReport, e
 type historicalArtifact struct {
 	ProducerDuration *time.Duration
 	LastAccess       time.Time
+	Size             int64
+	CreatedAt        time.Time
+	AccessCount      int64
+}
+
+type replayEvictions struct {
+	impact   int
+	fallback int
 }
 
 type pendingHistoricalArtifact struct {
@@ -345,7 +470,13 @@ type historicalKey struct {
 	CompatibilityID string
 }
 
-func activateHistoricalArtifacts(cache map[historicalKey]historicalArtifact, pending []pendingHistoricalArtifact, now time.Time, retention time.Duration) (map[historicalKey]historicalArtifact, []pendingHistoricalArtifact) {
+func activateHistoricalArtifacts(
+	cache map[historicalKey]historicalArtifact,
+	pending []pendingHistoricalArtifact,
+	now time.Time,
+	policy BacktestPolicy,
+) (map[historicalKey]historicalArtifact, []pendingHistoricalArtifact, replayEvictions) {
+	var decisions replayEvictions
 	sort.SliceStable(pending, func(i, j int) bool { return pending[i].AvailableAt.Before(pending[j].AvailableAt) })
 	remaining := pending[:0]
 	for _, candidate := range pending {
@@ -354,12 +485,96 @@ func activateHistoricalArtifacts(cache map[historicalKey]historicalArtifact, pen
 			continue
 		}
 		existing, found := cache[candidate.Key]
-		if found && !expired(existing.LastAccess, candidate.AvailableAt, retention) {
+		if found && !expired(existing.LastAccess, candidate.AvailableAt, policy.Retention) {
 			continue
+		}
+		for key, artifact := range cache {
+			if expired(artifact.LastAccess, candidate.AvailableAt, policy.Retention) {
+				delete(cache, key)
+			}
+		}
+		if policy.MaxBytes > 0 {
+			if candidate.Artifact.Size > policy.MaxBytes {
+				continue
+			}
+			for historicalCacheBytes(cache) > policy.MaxBytes-candidate.Artifact.Size {
+				oldest, found, effective := selectHistoricalVictim(cache, policy.EvictionPolicy, candidate.AvailableAt)
+				if !found {
+					break
+				}
+				delete(cache, oldest)
+				if policy.EvictionPolicy == retention.Impact {
+					if effective == retention.Impact {
+						decisions.impact++
+					} else {
+						decisions.fallback++
+					}
+				}
+			}
 		}
 		cache[candidate.Key] = candidate.Artifact
 	}
-	return cache, remaining
+	return cache, remaining, decisions
+}
+
+func selectHistoricalVictim(cache map[historicalKey]historicalArtifact, policy retention.Policy, now time.Time) (historicalKey, bool, retention.Policy) {
+	if policy != retention.Impact {
+		key, found := oldestHistoricalArtifact(cache)
+		return key, found, retention.LRU
+	}
+	keys := make([]historicalKey, 0, len(cache))
+	for key := range cache {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].ArtifactID < keys[j].ArtifactID || keys[i].ArtifactID == keys[j].ArtifactID && keys[i].CompatibilityID < keys[j].CompatibilityID
+	})
+	candidates := make([]retention.Candidate, 0, len(keys))
+	for _, key := range keys {
+		artifact := cache[key]
+		candidate := retention.Candidate{Bytes: artifact.Size, LastAccess: artifact.LastAccess, CreatedAt: artifact.CreatedAt, AccessCount: artifact.AccessCount}
+		if artifact.ProducerDuration != nil {
+			candidate.ProducerDurationMS = artifact.ProducerDuration.Milliseconds()
+			candidate.DurationKnown = true
+		}
+		candidates = append(candidates, candidate)
+	}
+	index, effective := retention.Choose(policy, candidates, now)
+	if effective == retention.LRU {
+		// Preserve the historical LRU contract, including its key ordering
+		// for equal access timestamps, when timing coverage forces fallback.
+		key, found := oldestHistoricalArtifact(cache)
+		return key, found, effective
+	}
+	if index < 0 {
+		return historicalKey{}, false, effective
+	}
+	return keys[index], true, effective
+}
+
+func historicalCacheBytes(cache map[historicalKey]historicalArtifact) int64 {
+	var total int64
+	for _, artifact := range cache {
+		if artifact.Size > math.MaxInt64-total {
+			return math.MaxInt64
+		}
+		total += artifact.Size
+	}
+	return total
+}
+
+func oldestHistoricalArtifact(cache map[historicalKey]historicalArtifact) (historicalKey, bool) {
+	var oldest historicalKey
+	var oldestArtifact historicalArtifact
+	found := false
+	for key, artifact := range cache {
+		if !found || artifact.LastAccess.Before(oldestArtifact.LastAccess) ||
+			artifact.LastAccess.Equal(oldestArtifact.LastAccess) &&
+				(key.ArtifactID < oldest.ArtifactID || key.ArtifactID == oldest.ArtifactID && key.CompatibilityID < oldest.CompatibilityID) {
+			oldest, oldestArtifact, found = key, artifact, true
+		}
+	}
+	return oldest, found
 }
 
 func expired(lastAccess, now time.Time, retention time.Duration) bool {
@@ -391,7 +606,7 @@ func validateHistory(runs []HistoricalRun) error {
 		}
 		seenWork := make(map[string]struct{}, len(run.Work))
 		for _, work := range run.Work {
-			if work.WorkID == "" || work.ArtifactID == "" || work.CompatibilityID == "" {
+			if work.WorkID == "" {
 				return fmt.Errorf("historical run %q has incomplete work identity", run.RunID)
 			}
 			if _, found := seenWork[work.WorkID]; found {
@@ -430,9 +645,10 @@ func buildRunReport(runID string, outcomes []FinalOutcome) (RunReport, error) {
 		RunID:         runID,
 		Outcomes:      make([]OutcomeReport, 0, len(outcomes)),
 		Sources:       make([]SourceReport, 0),
-		Eligible:      len(outcomes),
+		Groups:        len(outcomes),
 	}
 	sources := make(map[Source]*SourceReport)
+	integrations := make(map[Integration]*IntegrationReport)
 	var grossMS int64
 	knownGross := 0
 	knownNet := 0
@@ -440,6 +656,10 @@ func buildRunReport(runID string, outcomes []FinalOutcome) (RunReport, error) {
 	observedWeights := make(map[string]int64, len(outcomes))
 
 	for index, outcome := range outcomes {
+		eligibleUnits, hitUnits := outcomeUnits(outcome)
+		report.Eligible += eligibleUnits
+		report.Hits += hitUnits
+		report.Misses += eligibleUnits - hitUnits
 		if index == 0 || outcome.StartedAt.Before(report.StartedAt) {
 			report.StartedAt = outcome.StartedAt
 		}
@@ -452,11 +672,25 @@ func buildRunReport(runID string, outcomes []FinalOutcome) (RunReport, error) {
 		report.Bytes.Downloaded += outcome.Bytes.Downloaded
 		report.Bytes.Uploaded += outcome.Bytes.Uploaded
 		report.Degraded = report.Degraded || outcome.Degraded
+		if outcome.Integration != "" {
+			integration := integrations[outcome.Integration]
+			if integration == nil {
+				integration = &IntegrationReport{Integration: outcome.Integration}
+				integrations[outcome.Integration] = integration
+			}
+			integration.Groups++
+			integration.Eligible += eligibleUnits
+			integration.Hits += hitUnits
+			integration.Misses += eligibleUnits - hitUnits
+			integration.Timing = addTiming(integration.Timing, outcomeReport.Timing)
+			integration.Bytes.Downloaded += outcome.Bytes.Downloaded
+			integration.Bytes.Uploaded += outcome.Bytes.Uploaded
+			integration.Degraded = integration.Degraded || outcome.Degraded
+		}
 
 		observed := timingMilliseconds(outcome.Timing)
 		switch outcome.Result {
 		case ResultHit:
-			report.Hits++
 			if outcome.ProducerDuration != nil {
 				producer := outcome.ProducerDuration.Milliseconds()
 				grossMS += producer
@@ -470,11 +704,10 @@ func buildRunReport(runID string, outcomes []FinalOutcome) (RunReport, error) {
 				source = &SourceReport{Source: outcome.Source}
 				sources[outcome.Source] = source
 			}
-			source.Hits++
+			source.Hits += hitUnits
 			source.Downloaded += outcome.Bytes.Downloaded
 			source.Uploaded += outcome.Bytes.Uploaded
 		case ResultMiss:
-			report.Misses++
 			if outcome.ExecutionDuration != nil {
 				execution := outcome.ExecutionDuration.Milliseconds()
 				baselineWeights[outcome.WorkID] = execution
@@ -486,7 +719,13 @@ func buildRunReport(runID string, outcomes []FinalOutcome) (RunReport, error) {
 	if report.Eligible > 0 {
 		report.HitRate = float64(report.Hits) / float64(report.Eligible)
 	}
-	report.GrossAvoidedTaskTime = completeEstimate(grossMS, "producerDuration", knownGross, report.Hits, ConfidenceHigh)
+	hitGroups := 0
+	for _, outcome := range outcomes {
+		if outcome.Result == ResultHit {
+			hitGroups++
+		}
+	}
+	report.GrossAvoidedTaskTime = completeEstimate(grossMS, "producerDuration", knownGross, hitGroups, ConfidenceHigh)
 	if err := validateGraph(outcomes); err != nil {
 		return RunReport{}, err
 	}
@@ -494,9 +733,9 @@ func buildRunReport(runID string, outcomes []FinalOutcome) (RunReport, error) {
 		Method:     "criticalPath",
 		Confidence: ConfidenceUnknown,
 		Known:      knownNet,
-		Total:      report.Eligible,
+		Total:      report.Groups,
 	}
-	if knownNet == report.Eligible {
+	if knownNet == report.Groups {
 		baselineMS := criticalPath(outcomes, baselineWeights)
 		observedMS := criticalPath(outcomes, observedWeights)
 		netMS := baselineMS - observedMS
@@ -507,6 +746,15 @@ func buildRunReport(runID string, outcomes []FinalOutcome) (RunReport, error) {
 		report.Sources = append(report.Sources, *source)
 	}
 	sort.Slice(report.Sources, func(i, j int) bool { return report.Sources[i].Source < report.Sources[j].Source })
+	for _, integration := range integrations {
+		if integration.Eligible > 0 {
+			integration.HitRate = float64(integration.Hits) / float64(integration.Eligible)
+		}
+		report.Integrations = append(report.Integrations, *integration)
+	}
+	sort.Slice(report.Integrations, func(i, j int) bool {
+		return report.Integrations[i].Integration < report.Integrations[j].Integration
+	})
 	return report, nil
 }
 
@@ -604,6 +852,7 @@ func aggregatePeriod(from, to time.Time, reports []RunReport) PeriodReport {
 		Sources:       make([]SourceReport, 0),
 	}
 	sources := make(map[Source]*SourceReport)
+	integrations := make(map[Integration]*IntegrationReport)
 	var grossMS int64
 	var netMS int64
 	knownGross := 0
@@ -611,6 +860,7 @@ func aggregatePeriod(from, to time.Time, reports []RunReport) PeriodReport {
 	knownNet := 0
 	totalNet := 0
 	for _, report := range reports {
+		period.Groups += report.Groups
 		period.Eligible += report.Eligible
 		period.Hits += report.Hits
 		period.Misses += report.Misses
@@ -638,6 +888,21 @@ func aggregatePeriod(from, to time.Time, reports []RunReport) PeriodReport {
 			source.Downloaded += sourceReport.Downloaded
 			source.Uploaded += sourceReport.Uploaded
 		}
+		for _, integrationReport := range report.Integrations {
+			integration := integrations[integrationReport.Integration]
+			if integration == nil {
+				integration = &IntegrationReport{Integration: integrationReport.Integration}
+				integrations[integrationReport.Integration] = integration
+			}
+			integration.Groups += integrationReport.Groups
+			integration.Eligible += integrationReport.Eligible
+			integration.Hits += integrationReport.Hits
+			integration.Misses += integrationReport.Misses
+			integration.Timing = addTiming(integration.Timing, integrationReport.Timing)
+			integration.Bytes.Downloaded += integrationReport.Bytes.Downloaded
+			integration.Bytes.Uploaded += integrationReport.Bytes.Uploaded
+			integration.Degraded = integration.Degraded || integrationReport.Degraded
+		}
 	}
 	if period.Eligible > 0 {
 		period.HitRate = float64(period.Hits) / float64(period.Eligible)
@@ -648,12 +913,24 @@ func aggregatePeriod(from, to time.Time, reports []RunReport) PeriodReport {
 		period.Sources = append(period.Sources, *source)
 	}
 	sort.Slice(period.Sources, func(i, j int) bool { return period.Sources[i].Source < period.Sources[j].Source })
+	for _, integration := range integrations {
+		if integration.Eligible > 0 {
+			integration.HitRate = float64(integration.Hits) / float64(integration.Eligible)
+		}
+		period.Integrations = append(period.Integrations, *integration)
+	}
+	sort.Slice(period.Integrations, func(i, j int) bool {
+		return period.Integrations[i].Integration < period.Integrations[j].Integration
+	})
 	return period
 }
 
 func reportOutcome(outcome FinalOutcome) OutcomeReport {
+	eligibleUnits, hitUnits := outcomeUnits(outcome)
 	return OutcomeReport{
 		WorkID:              outcome.WorkID,
+		WorkspaceID:         outcome.WorkspaceID,
+		Integration:         outcome.Integration,
 		Dependencies:        append([]string(nil), outcome.Dependencies...),
 		ArtifactID:          outcome.ArtifactID,
 		CompatibilityID:     outcome.CompatibilityID,
@@ -666,6 +943,8 @@ func reportOutcome(outcome FinalOutcome) OutcomeReport {
 		Timing:              reportTiming(outcome.Timing),
 		Bytes:               outcome.Bytes,
 		Degraded:            outcome.Degraded,
+		EligibleUnits:       eligibleUnits,
+		HitUnits:            hitUnits,
 	}
 }
 
@@ -716,10 +995,13 @@ func validateOutcome(outcome FinalOutcome) error {
 	if outcome.WorkID == "" {
 		return errors.New("measurement work ID is required")
 	}
+	if outcome.Integration != "" && !validIntegration(outcome.Integration) {
+		return fmt.Errorf("unsupported measurement integration %q", outcome.Integration)
+	}
 	if outcome.StartedAt.IsZero() || outcome.FinishedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) {
 		return errors.New("measurement outcome needs an ordered start and finish")
 	}
-	if outcome.Result != ResultHit && outcome.Result != ResultMiss {
+	if outcome.Result != ResultHit && outcome.Result != ResultMiss && outcome.Result != ResultUnknown {
 		return fmt.Errorf("unsupported final outcome %q", outcome.Result)
 	}
 	if outcome.Result == ResultHit && outcome.Source == SourceNone {
@@ -727,6 +1009,9 @@ func validateOutcome(outcome FinalOutcome) error {
 	}
 	if outcome.Result == ResultMiss && outcome.Source != SourceNone {
 		return errors.New("cache miss source must be none")
+	}
+	if outcome.Result == ResultUnknown && outcome.Source != SourceUnattributed {
+		return errors.New("unknown cache result source must be unattributed")
 	}
 	if !validSource(outcome.Source) {
 		return fmt.Errorf("unsupported cache source %q", outcome.Source)
@@ -737,7 +1022,80 @@ func validateOutcome(outcome FinalOutcome) error {
 	if durationIsNegative(outcome.ProducerDuration) || durationIsNegative(outcome.ExecutionDuration) || timingIsNegative(outcome.Timing) {
 		return errors.New("measurement durations cannot be negative")
 	}
+	if outcome.EligibleUnits < 0 || outcome.HitUnits < 0 {
+		return errors.New("measurement unit counts cannot be negative")
+	}
+	if outcome.EligibleUnits == 0 && outcome.HitUnits != 0 {
+		return errors.New("measurement hit units require eligible units")
+	}
+	if outcome.EligibleUnits > 0 {
+		if outcome.HitUnits > outcome.EligibleUnits {
+			return errors.New("measurement hit units cannot exceed eligible units")
+		}
+		if outcome.Result == ResultHit && outcome.HitUnits == 0 {
+			return errors.New("cache hit group needs at least one hit unit")
+		}
+		if outcome.Result == ResultMiss && outcome.HitUnits != 0 {
+			return errors.New("cache miss group cannot contain hit units")
+		}
+	}
 	return nil
+}
+
+func validateActionsMissCompletion(completion ActionsMissCompletion) error {
+	if err := validateBoundedText("Actions miss completion run ID", completion.RunID, maximumRunIDBytes, false); err != nil {
+		return err
+	}
+	if err := validateBoundedText("Actions miss completion work ID", completion.WorkID, maximumIdentityBytes, false); err != nil {
+		return err
+	}
+	if completion.FinishedAt.IsZero() {
+		return errors.New("Actions miss completion finish is required")
+	}
+	if completion.ExecutionDuration < 0 || completion.UploadDuration < 0 {
+		return errors.New("Actions miss completion durations cannot be negative")
+	}
+	if completion.UploadedBytes < 0 {
+		return errors.New("Actions miss completion bytes cannot be negative")
+	}
+	return nil
+}
+
+func validateActionsMissCompletionOrder(outcome FinalOutcome, completion ActionsMissCompletion) error {
+	if completion.FinishedAt.Before(outcome.FinishedAt) {
+		return errors.New("Actions miss completion finish cannot precede the lookup finish")
+	}
+	elapsed := completion.FinishedAt.Sub(outcome.FinishedAt)
+	if completion.ExecutionDuration > elapsed || completion.UploadDuration > elapsed-completion.ExecutionDuration {
+		return errors.New("Actions miss completion durations exceed the observed completion interval")
+	}
+	return nil
+}
+
+func actionsMissNotFound(completion ActionsMissCompletion) error {
+	return fmt.Errorf("%w: run %q work %q", ErrActionsMissNotFound, completion.RunID, completion.WorkID)
+}
+
+func validIntegration(integration Integration) bool {
+	switch integration {
+	case IntegrationTurbo, IntegrationActions, IntegrationBuildkit:
+		return true
+	default:
+		return false
+	}
+}
+
+func outcomeUnits(outcome FinalOutcome) (int, int) {
+	if outcome.Result == ResultUnknown {
+		return 0, 0
+	}
+	if outcome.EligibleUnits > 0 {
+		return outcome.EligibleUnits, outcome.HitUnits
+	}
+	if outcome.Result == ResultHit {
+		return 1, 1
+	}
+	return 1, 0
 }
 
 func validSource(source Source) bool {

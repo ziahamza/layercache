@@ -1,0 +1,8 @@
+{
+  "name": "layercache-actions-cache-minimum-fixture",
+  "private": true,
+  "packageManager": "pnpm@10.34.5",
+  "dependencies": {
+    "@actions/cache": "5.0.0"
+  }
+}

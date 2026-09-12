@@ -1,0 +1,22 @@
+services:
+  team-cache:
+    image: ${LAYER_CACHE_IMAGE:?Set an immutable Layer Cache image digest}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "127.0.0.1:${LAYER_CACHE_PORT:-7437}:7437"
+    volumes:
+      - "${LAYER_CACHE_CONFIG_DIRECTORY:?Set the protected config directory}:/etc/layercache:ro"
+      - "${LAYER_CACHE_DATA_DIRECTORY:?Set the state directory}:/var/lib/layercache"
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

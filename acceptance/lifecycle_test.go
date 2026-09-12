@@ -117,17 +117,12 @@ func TestInstalledStatusReportsPersistedLocalCacheStatsAfterStop(t *testing.T) {
 		"--listen", address,
 		"--non-interactive", "--json",
 	)
-	var connection turboConnection
-	if err := json.Unmarshal(runBinary(t, binary,
-		"integration", "turbo", "--config", configPath, "--json",
-	), &connection); err != nil {
-		t.Fatal(err)
-	}
 	runBinary(t, binary, "start", "--config", configPath, "--json")
 	t.Cleanup(func() {
 		cmd := exec.Command(binary, "stop", "--config", configPath, "--json")
 		_, _ = cmd.CombinedOutput()
 	})
+	connection := captureTurboConnection(t, binary, configPath)
 
 	putTurboArtifact(t, connection, "offline-status-fixture", []byte("cached bytes"))
 	runBinary(t, binary, "stop", "--config", configPath, "--json")

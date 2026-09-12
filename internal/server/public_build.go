@@ -28,13 +28,14 @@ var (
 )
 
 type publicBuildRequestBody struct {
-	Repository   string                   `json:"repository"`
-	Commit       string                   `json:"commit"`
-	Integration  publicbuild.Integration  `json:"integration"`
-	Target       string                   `json:"target"`
-	RecipeDigest string                   `json:"recipeDigest"`
-	Platform     publicbuild.Platform     `json:"platform"`
-	Resources    publicBuildResourcesBody `json:"resources"`
+	Repository   string                      `json:"repository"`
+	Commit       string                      `json:"commit"`
+	Integration  publicbuild.Integration     `json:"integration"`
+	Target       string                      `json:"target"`
+	RecipeDigest string                      `json:"recipeDigest"`
+	Platform     publicbuild.Platform        `json:"platform"`
+	Inputs       []publicbuild.DeclaredInput `json:"inputs,omitempty"`
+	Resources    publicBuildResourcesBody    `json:"resources"`
 }
 
 type publicBuildResourcesBody struct {
@@ -63,6 +64,8 @@ type publicBuildResponse struct {
 
 type publicBuildPublicationResponse struct {
 	PublicCachePublication       string `json:"publicCachePublication"`
+	NativeKey                    string `json:"nativeKey,omitempty"`
+	PublicImportSelector         string `json:"publicImportSelector,omitempty"`
 	Digest                       string `json:"digest"`
 	SizeBytes                    int64  `json:"sizeBytes"`
 	MediaType                    string `json:"mediaType"`
@@ -70,15 +73,17 @@ type publicBuildPublicationResponse struct {
 }
 
 type publicBuildWorkerLeaseBody struct {
-	WorkerID     string                    `json:"workerId"`
-	Integrations []publicbuild.Integration `json:"integrations"`
-	Platforms    []publicbuild.Platform    `json:"platforms"`
+	WorkerID     string                               `json:"workerId"`
+	Integrations []publicbuild.Integration            `json:"integrations"`
+	Platforms    []publicbuild.Platform               `json:"platforms"`
+	Recipes      []publicbuild.WorkerRecipeCapability `json:"recipes,omitempty"`
 }
 
 type publicBuildWorkerLeaseResponse struct {
 	LeaseToken string              `json:"leaseToken"`
 	WorkerID   string              `json:"workerId"`
 	LeasedAt   time.Time           `json:"leasedAt"`
+	ExpiresAt  time.Time           `json:"expiresAt"`
 	Build      publicBuildResponse `json:"build"`
 }
 
@@ -113,8 +118,17 @@ type publicBuildLogResponse struct {
 	Message   string    `json:"message"`
 }
 
-func publicBuildConfig(cfg config.Config) publicbuild.Config {
-	secrets := []string{cfg.PublisherToken, cfg.LocalToken, cfg.PublicPrivateKey, cfg.TeamToken}
+func publicBuildConfig(
+	cfg config.Config,
+	publications publicationRegistry,
+	store cacheStore,
+	builds func() publicBuildCoordinator,
+) publicbuild.Config {
+	secrets := []string{
+		cfg.PublisherToken, cfg.PublicBuildWorkerToken, cfg.PublicCollectorToken,
+		cfg.LocalToken, cfg.PublicPrivateKey, cfg.TeamToken,
+	}
+	recipePolicy, _ := publicbuild.NewRecipeAllowlist(cfg.PublicBuildRecipeDigests)
 	return publicbuild.Config{
 		AllowlistedRepositories: append([]string(nil), cfg.PublicBuildRepositories...),
 		Limits: publicbuild.Resources{
@@ -132,7 +146,86 @@ func publicBuildConfig(cfg config.Config) publicbuild.Config {
 			message = publicBuildSensitiveLogValue.ReplaceAllString(message, "$1$2[REDACTED]")
 			return publicBuildWorkspacePath.ReplaceAllString(message, "[WORKSPACE]")
 		},
+		SourcePolicy: publicbuild.NewGitHubSourcePolicy(publicbuild.GitHubSourcePolicyOptions{
+			BaseURL: cfg.GitHubAPIURL, ApprovedRefs: cfg.PublicBuildApprovedRefs,
+		}),
+		RecipePolicy: recipePolicy,
+		Publications: registryPublicationIndex{
+			registry: publications, store: store, builds: builds,
+			accept: func(publication publictrust.Publication) bool {
+				return publicBuilderImageMatchesConfig(cfg, publication.BuilderImageDigest)
+			},
+		},
 	}
+}
+
+type registryPublicationIndex struct {
+	registry publicationRegistry
+	store    cacheStore
+	builds   func() publicBuildCoordinator
+	accept   func(publictrust.Publication) bool
+}
+
+func (index registryPublicationIndex) Find(ctx context.Context, request publicbuild.BuildRequest) (publicbuild.ExistingPublication, error) {
+	if index.registry == nil {
+		return publicbuild.ExistingPublication{}, publicbuild.ErrPublicationNotFound
+	}
+	publication, err := index.registry.FindBuild(ctx, publictrust.BuildIdentity{
+		Repository: request.Repository, Commit: request.Commit,
+		Integration: string(request.Integration), Target: request.Target,
+		RecipeDigest: request.RecipeDigest, Platform: string(request.Platform),
+		Inputs: publicTrustInputs(request.Inputs),
+	})
+	if errors.Is(err, publictrust.ErrNotFound) || errors.Is(err, publictrust.ErrExpired) ||
+		errors.Is(err, publictrust.ErrRevoked) || errors.Is(err, publictrust.ErrAmbiguous) {
+		return publicbuild.ExistingPublication{}, publicbuild.ErrPublicationNotFound
+	}
+	if err != nil {
+		return publicbuild.ExistingPublication{}, err
+	}
+	if index.accept != nil && !index.accept(publication) {
+		// A publication produced by a previously reviewed image can remain
+		// resolvable, but it must not suppress a build after the configured
+		// kernel/rootfs/contract set rotates.
+		return publicbuild.ExistingPublication{}, publicbuild.ErrPublicationNotFound
+	}
+	if index.builds != nil {
+		builds := index.builds()
+		if builds == nil {
+			return publicbuild.ExistingPublication{}, errors.New("Public Build coordinator is unavailable")
+		}
+		build, inspectErr := builds.Inspect(ctx, publication.BuildID)
+		if errors.Is(inspectErr, publicbuild.ErrNotFound) ||
+			inspectErr == nil && !completedPublicBuildMatchesRetry(build, publication) {
+			return publicbuild.ExistingPublication{}, index.retireUnavailable(ctx, publication)
+		}
+		if inspectErr != nil {
+			return publicbuild.ExistingPublication{}, inspectErr
+		}
+	}
+	available, err := verifiedPublicArtifact(ctx, index.store, publication)
+	if err != nil {
+		return publicbuild.ExistingPublication{}, err
+	}
+	if !available {
+		return publicbuild.ExistingPublication{}, index.retireUnavailable(ctx, publication)
+	}
+	return publicbuild.ExistingPublication{
+		Identity: publication.Identity(), BuildID: publication.BuildID,
+		Digest: "sha256:" + publication.Digest, SizeBytes: publication.Size,
+		MediaType:        publicBuildMediaType(publication.Integration),
+		ProducerDuration: time.Duration(publication.DurationMS) * time.Millisecond,
+	}, nil
+}
+
+func (index registryPublicationIndex) retireUnavailable(
+	ctx context.Context,
+	publication publictrust.Publication,
+) error {
+	if err := retireInvalidPublicPublication(ctx, index.registry, index.store, publication); err != nil {
+		return fmt.Errorf("retire unusable Public Cache publication: %w", err)
+	}
+	return publicbuild.ErrPublicationUnavailable
 }
 
 func (server *Server) publicBuildRoutes() {
@@ -144,10 +237,45 @@ func (server *Server) publicBuildRoutes() {
 	server.mux.Handle("GET /v1/public-builds/{id}/logs", server.requireToken(http.HandlerFunc(server.publicBuildLogs)))
 	server.mux.Handle("POST /v1/public-builds/{id}/cancel", server.requireToken(http.HandlerFunc(server.cancelPublicBuild)))
 
-	server.mux.Handle("POST /v1/public-build-worker/lease", server.requirePublisher(http.HandlerFunc(server.leasePublicBuild)))
-	server.mux.Handle("POST /v1/public-build-worker/{id}/logs", server.requirePublisher(http.HandlerFunc(server.appendPublicBuildLog)))
-	server.mux.Handle("POST /v1/public-build-worker/{id}/complete", server.requirePublisher(http.HandlerFunc(server.completePublicBuild)))
-	server.mux.Handle("POST /v1/public-build-worker/{id}/fail", server.requirePublisher(http.HandlerFunc(server.failPublicBuild)))
+	workerCredential := server.config.PublicBuildWorkerToken
+	collectorCredential := server.config.PublicCollectorToken
+	server.mux.Handle("POST /v1/public-build-worker/lease", server.requirePublicCredential(workerCredential, http.HandlerFunc(server.leasePublicBuild)))
+	server.mux.Handle("GET /v1/public-build-worker/{id}", server.requirePublicCredential(workerCredential, http.HandlerFunc(server.inspectWorkerPublicBuild)))
+	server.mux.Handle("POST /v1/public-build-worker/{id}/heartbeat", server.requirePublicCredential(workerCredential, http.HandlerFunc(server.renewPublicBuildLease)))
+	server.mux.Handle("POST /v1/public-build-worker/{id}/logs", server.requirePublicCredential(workerCredential, http.HandlerFunc(server.appendPublicBuildLog)))
+	server.mux.Handle("POST /v1/public-build-worker/{id}/complete", server.requirePublicCredential(collectorCredential, http.HandlerFunc(server.completePublicBuild)))
+	server.mux.Handle("POST /v1/public-build-worker/{id}/fail", server.requirePublicCredential(workerCredential, http.HandlerFunc(server.failPublicBuild)))
+}
+
+func (server *Server) inspectWorkerPublicBuild(writer http.ResponseWriter, request *http.Request) {
+	if !server.publicBuildAvailable(writer) {
+		return
+	}
+	build, err := server.publicBuilds.Inspect(request.Context(), request.PathValue("id"))
+	if !writePublicBuildLookupError(writer, err) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, server.publicBuildView(build))
+}
+
+func (server *Server) renewPublicBuildLease(writer http.ResponseWriter, request *http.Request) {
+	if !server.publicBuildAvailable(writer) {
+		return
+	}
+	var body publicBuildLeaseBody
+	if err := decodePublicBuildJSON(request, &body); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid Public Build heartbeat"})
+		return
+	}
+	lease, err := server.publicBuilds.Renew(request.Context(), publicBuildLease(request.PathValue("id"), body))
+	if !writePublicBuildLeaseError(writer, err) {
+		return
+	}
+	writeJSON(writer, http.StatusOK, publicBuildWorkerLeaseResponse{
+		LeaseToken: lease.Token, WorkerID: lease.WorkerID, LeasedAt: lease.LeasedAt,
+		ExpiresAt: lease.ExpiresAt,
+		Build:     server.publicBuildView(lease.Build),
+	})
 }
 
 func (server *Server) requestPublicBuild(writer http.ResponseWriter, request *http.Request) {
@@ -167,10 +295,16 @@ func (server *Server) requestPublicBuild(writer http.ResponseWriter, request *ht
 	result, err := server.publicBuilds.Request(request.Context(), publicbuild.BuildRequest{
 		Repository: body.Repository, Commit: body.Commit, Integration: body.Integration,
 		Target: body.Target, RecipeDigest: body.RecipeDigest, Platform: body.Platform,
+		Inputs:    body.Inputs,
 		Resources: resources,
 	})
 	if errors.Is(err, publicbuild.ErrRejected) {
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, publicbuild.ErrPublicationPending) {
+		writer.Header().Set("Retry-After", "1")
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 	if err != nil {
@@ -181,7 +315,7 @@ func (server *Server) requestPublicBuild(writer http.ResponseWriter, request *ht
 	if result.Reused {
 		status = http.StatusOK
 	}
-	writeJSON(writer, status, publicBuildRequestResponse{Build: publicBuildView(result.Build), Reused: result.Reused})
+	writeJSON(writer, status, publicBuildRequestResponse{Build: server.publicBuildView(result.Build), Reused: result.Reused})
 }
 
 func (server *Server) inspectPublicBuild(writer http.ResponseWriter, request *http.Request) {
@@ -192,7 +326,7 @@ func (server *Server) inspectPublicBuild(writer http.ResponseWriter, request *ht
 	if !writePublicBuildLookupError(writer, err) {
 		return
 	}
-	writeJSON(writer, http.StatusOK, publicBuildView(build))
+	writeJSON(writer, http.StatusOK, server.publicBuildView(build))
 }
 
 func (server *Server) publicBuildLogs(writer http.ResponseWriter, request *http.Request) {
@@ -227,7 +361,7 @@ func (server *Server) cancelPublicBuild(writer http.ResponseWriter, request *htt
 		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "cancel Public Build"})
 		return
 	}
-	writeJSON(writer, http.StatusOK, publicBuildView(build))
+	writeJSON(writer, http.StatusOK, server.publicBuildView(build))
 }
 
 func (server *Server) leasePublicBuild(writer http.ResponseWriter, request *http.Request) {
@@ -244,7 +378,7 @@ func (server *Server) leasePublicBuild(writer http.ResponseWriter, request *http
 		return
 	}
 	worker := &publicBuildCapabilityWorker{id: body.WorkerID, capabilities: publicbuild.WorkerCapabilities{
-		Integrations: body.Integrations, Platforms: body.Platforms,
+		Integrations: body.Integrations, Platforms: body.Platforms, Recipes: body.Recipes,
 	}}
 	lease, err := server.publicBuilds.LeaseNext(request.Context(), worker)
 	if errors.Is(err, publicbuild.ErrNoWork) {
@@ -261,7 +395,8 @@ func (server *Server) leasePublicBuild(writer http.ResponseWriter, request *http
 	}
 	writeJSON(writer, http.StatusOK, publicBuildWorkerLeaseResponse{
 		LeaseToken: lease.Token, WorkerID: lease.WorkerID, LeasedAt: lease.LeasedAt,
-		Build: publicBuildView(lease.Build),
+		ExpiresAt: lease.ExpiresAt,
+		Build:     server.publicBuildView(lease.Build),
 	})
 }
 
@@ -311,10 +446,24 @@ func (server *Server) completePublicBuild(writer http.ResponseWriter, request *h
 		writeJSON(writer, http.StatusConflict, map[string]string{"error": "Public Cache publication duration is invalid"})
 		return
 	}
-	completed, err := server.publicBuilds.Complete(
-		request.Context(),
-		publicBuildLease(build.ID, body.publicBuildLeaseBody),
-		publicbuild.Publication{
+	if build.State == publicbuild.StateSucceeded {
+		if build.Publication == nil || len(build.Publication.Outputs) != 1 ||
+			build.Publication.Outputs[0].Name != body.PublicationIdentity {
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": "Public Build completion does not match prior publication"})
+			return
+		}
+		writeJSON(writer, http.StatusOK, server.publicBuildView(build))
+		return
+	}
+	permit, err := server.publicBuilds.BeginLeasedPublication(
+		request.Context(), publicBuildLease(build.ID, body.publicBuildLeaseBody),
+	)
+	if err != nil {
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "Public Build cannot publish in its current state"})
+		return
+	}
+	completed, err := server.publicBuilds.CommitPublication(
+		request.Context(), permit, publicbuild.Publication{
 			Outputs: []publicbuild.OutputDescriptor{{
 				Name: body.PublicationIdentity, Digest: "sha256:" + publication.Digest,
 				SizeBytes: publication.Size, MediaType: publicBuildMediaType(publication.Integration),
@@ -322,10 +471,30 @@ func (server *Server) completePublicBuild(writer http.ResponseWriter, request *h
 			ProducerDuration: time.Duration(publication.DurationMS) * time.Millisecond,
 		},
 	)
-	if !writePublicBuildLeaseError(writer, err) {
+	if err != nil {
+		_, _ = server.publicBuilds.AbortPublication(context.WithoutCancel(request.Context()), permit, "trusted collection did not finish")
+	}
+	if !writePublicBuildPublicationError(writer, err) {
 		return
 	}
-	writeJSON(writer, http.StatusOK, publicBuildView(completed))
+	writeJSON(writer, http.StatusOK, server.publicBuildView(completed))
+}
+
+func writePublicBuildPublicationError(writer http.ResponseWriter, err error) bool {
+	if err == nil {
+		return true
+	}
+	switch {
+	case errors.Is(err, publicbuild.ErrNotFound):
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "Public Build not found"})
+	case errors.Is(err, publicbuild.ErrPublicationLost), errors.Is(err, publicbuild.ErrInvalidTransition):
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "Public Build publication is no longer active"})
+	case errors.Is(err, publicbuild.ErrRejected):
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	default:
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "publish Public Build"})
+	}
+	return false
 }
 
 func (server *Server) failPublicBuild(writer http.ResponseWriter, request *http.Request) {
@@ -347,7 +516,7 @@ func (server *Server) failPublicBuild(writer http.ResponseWriter, request *http.
 	if !writePublicBuildLeaseError(writer, err) {
 		return
 	}
-	writeJSON(writer, http.StatusOK, publicBuildView(build))
+	writeJSON(writer, http.StatusOK, server.publicBuildView(build))
 }
 
 func (server *Server) publicBuildAvailable(writer http.ResponseWriter) bool {
@@ -417,13 +586,14 @@ func (resources publicBuildResourcesBody) domain() (publicbuild.Resources, error
 	}, nil
 }
 
-func publicBuildView(build publicbuild.Build) publicBuildResponse {
+func (server *Server) publicBuildView(build publicbuild.Build) publicBuildResponse {
 	response := publicBuildResponse{
 		ID: build.ID,
 		Request: publicBuildRequestBody{
 			Repository: build.Request.Repository, Commit: build.Request.Commit,
 			Integration: build.Request.Integration, Target: build.Request.Target,
 			RecipeDigest: build.Request.RecipeDigest, Platform: build.Request.Platform,
+			Inputs: append([]publicbuild.DeclaredInput(nil), build.Request.Inputs...),
 			Resources: publicBuildResourcesBody{
 				CPUMillis: build.Request.Resources.CPUMillis, MemoryBytes: build.Request.Resources.MemoryBytes,
 				DiskBytes:           build.Request.Resources.DiskBytes,
@@ -443,10 +613,24 @@ func publicBuildView(build publicbuild.Build) publicBuildResponse {
 	}
 	if build.Publication != nil && len(build.Publication.Outputs) == 1 {
 		output := build.Publication.Outputs[0]
+		nativeKey := ""
+		switch build.Request.Integration {
+		case publicbuild.IntegrationBuildKit:
+			nativeKey, _ = publicbuild.BuildKitPublicNativeKey(build.Request)
+		case publicbuild.IntegrationActions:
+			nativeKey, _ = publicbuild.ActionsPublicNativeKey(
+				build.Request,
+				actionsPublicToolchain,
+				server.config.ActionsPublicBuilder,
+			)
+		}
 		response.Publication = &publicBuildPublicationResponse{
-			PublicCachePublication: output.Name, Digest: output.Digest,
+			PublicCachePublication: output.Name, NativeKey: nativeKey, Digest: output.Digest,
 			SizeBytes: output.SizeBytes, MediaType: output.MediaType,
 			ProducerDurationMilliseconds: build.Publication.ProducerDuration.Milliseconds(),
+		}
+		if build.Request.Integration == publicbuild.IntegrationBuildKit && nativeKey != "" {
+			response.Publication.PublicImportSelector = nativeKey + "=" + output.Name
 		}
 	}
 	return response
@@ -457,15 +641,72 @@ func publicBuildLease(id string, body publicBuildLeaseBody) publicbuild.Lease {
 }
 
 func publicBuildPublicationMatches(cfg config.Config, build publicbuild.Build, identity string, publication publictrust.Publication) bool {
+	if !publicBuilderImageMatchesConfig(cfg, publication.BuilderImageDigest) {
+		return false
+	}
+	compatibility, err := publicbuild.CompatibilityIdentity(build.Request)
+	if err != nil {
+		return false
+	}
+	project, err := publicbuild.PublicationProjectIdentity(
+		build.Request.Integration,
+		cfg.ProjectID,
+		cfg.ActionsRepository,
+		build.Request.Repository,
+	)
+	if err != nil {
+		return false
+	}
+	var expectedNativeKey string
+	switch build.Request.Integration {
+	case publicbuild.IntegrationBuildKit:
+		expectedNativeKey, err = publicbuild.BuildKitPublicNativeKey(build.Request)
+	case publicbuild.IntegrationActions:
+		if publication.Toolchain != actionsPublicToolchain ||
+			publication.Builder != cfg.ActionsPublicBuilder ||
+			build.Request.RecipeDigest != cfg.ActionsPublicRecipeDigest {
+			return false
+		}
+		expectedNativeKey, err = publicbuild.ActionsPublicNativeKey(
+			build.Request,
+			actionsPublicToolchain,
+			cfg.ActionsPublicBuilder,
+		)
+	}
+	if err != nil || expectedNativeKey != "" && publication.NativeKey != expectedNativeKey {
+		return false
+	}
 	return publication.Identity() == identity &&
 		publication.BuildID == build.ID &&
 		publication.Repository == build.Request.Repository &&
 		publication.Commit == build.Request.Commit &&
 		publication.RecipeDigest == build.Request.RecipeDigest &&
+		publication.Target == build.Request.Target &&
 		publication.Platform == string(build.Request.Platform) &&
 		publication.Integration == string(build.Request.Integration) &&
-		publication.Project == cfg.ProjectID &&
-		publication.Compatibility == cfg.CompatibilityID
+		publicTrustInputsEqual(publication.Inputs, build.Request.Inputs) &&
+		publication.Project == project &&
+		publication.Compatibility == compatibility
+}
+
+func publicTrustInputs(inputs []publicbuild.DeclaredInput) []publictrust.DeclaredInput {
+	result := make([]publictrust.DeclaredInput, len(inputs))
+	for index, input := range inputs {
+		result[index] = publictrust.DeclaredInput{Name: input.Name, Value: input.Value}
+	}
+	return result
+}
+
+func publicTrustInputsEqual(trustInputs []publictrust.DeclaredInput, buildInputs []publicbuild.DeclaredInput) bool {
+	if len(trustInputs) != len(buildInputs) {
+		return false
+	}
+	for index := range trustInputs {
+		if trustInputs[index].Name != buildInputs[index].Name || trustInputs[index].Value != buildInputs[index].Value {
+			return false
+		}
+	}
+	return true
 }
 
 func publicBuildMediaType(integration string) string {

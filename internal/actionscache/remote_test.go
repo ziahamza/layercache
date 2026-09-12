@@ -3,6 +3,7 @@ package actionscache_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -113,6 +114,11 @@ func TestRemoteStorageSpeaksV1WithBearerAuthentication(t *testing.T) {
 	}
 	if !bytes.Equal(contents, []byte("new")) {
 		t.Fatalf("archive = %q, want new", contents)
+	}
+	if _, err := remote.Open(context.Background(), actionscache.OpenRequest{
+		Scope: wrongScope, ID: result.Entry.ID,
+	}); !errors.Is(err, actionscache.ErrNotFound) {
+		t.Fatalf("cross-compatibility open after lookup metadata was consumed = %v, want not found", err)
 	}
 
 	reservation, err := remote.Reserve(context.Background(), actionscache.ReserveRequest{
@@ -241,6 +247,54 @@ func TestRemoteStorageRejectsInvalidEndpoint(t *testing.T) {
 	}
 }
 
+func TestRemoteStorageBoundsAndValidatesArchiveRedirects(t *testing.T) {
+	t.Parallel()
+
+	scope := actionscache.Scope{
+		Repository: "acme/widgets", Ref: "refs/heads/main", DefaultRef: "refs/heads/main",
+		Compatibility: "linux-amd64-schema1",
+	}
+	for _, test := range []struct {
+		name     string
+		redirect func(string) string
+		want     string
+	}{
+		{name: "loop", redirect: func(serverURL string) string { return serverURL + "/_apis/artifactcache/caches/1/archive" }, want: "redirect limit"},
+		{name: "HTTPS downgrade", redirect: func(string) string { return "http://cache.example.test/_apis/artifactcache/caches/1/archive" }, want: "must use HTTPS"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/_apis/artifactcache/cache":
+					_ = json.NewEncoder(writer).Encode(map[string]any{
+						"cacheKey": "redirected", "scope": scope.Ref, "cacheVersion": "v1",
+						"creationTime":    time.Now().UTC(),
+						"archiveLocation": server.URL + "/_apis/artifactcache/caches/1/archive",
+					})
+				case "/_apis/artifactcache/caches/1/archive":
+					http.Redirect(writer, request, test.redirect(server.URL), http.StatusTemporaryRedirect)
+				default:
+					writer.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			remote, err := actionscache.NewRemoteStorage(actionscache.RemoteStorageConfig{Endpoint: server.URL, Token: "token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lookup, err := remote.Lookup(context.Background(), actionscache.LookupRequest{Scope: scope, Keys: []string{"redirected"}, Version: "v1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = remote.Open(context.Background(), actionscache.OpenRequest{Scope: scope, ID: lookup.Entry.ID})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("redirect error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestRemoteStorageUsesResponseHeaderDeadline(t *testing.T) {
 	t.Parallel()
 
@@ -262,6 +316,36 @@ func TestRemoteStorageUsesResponseHeaderDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 130*time.Millisecond {
 		t.Fatalf("lookup returned after %s, want response-header deadline near 50ms", elapsed)
+	}
+}
+
+func TestRemoteStorageUsesMetadataBodyIdleDeadline(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		flusher := writer.(http.Flusher)
+		_, _ = io.WriteString(writer, `{`)
+		flusher.Flush()
+		time.Sleep(150 * time.Millisecond)
+		_, _ = io.WriteString(writer, `}`)
+	}))
+	t.Cleanup(server.Close)
+	remote, err := actionscache.NewRemoteStorage(actionscache.RemoteStorageConfig{
+		Endpoint: server.URL, Token: "team-token", TransferIdleTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = remote.Lookup(context.Background(), actionscache.LookupRequest{
+		Scope: actionscache.Scope{Compatibility: "linux-amd64-schema1"}, Keys: []string{"key"}, Version: "v1",
+	})
+	if !errors.Is(err, actionscache.ErrTransferIdleTimeout) {
+		t.Fatalf("metadata body error = %v, want ErrTransferIdleTimeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 130*time.Millisecond {
+		t.Fatalf("metadata body returned after %s, want idle deadline near 50ms", elapsed)
 	}
 }
 

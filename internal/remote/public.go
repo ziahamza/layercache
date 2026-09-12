@@ -20,6 +20,7 @@ type PublicClient struct {
 	baseURL *url.URL
 	key     ed25519.PublicKey
 	http    *http.Client
+	idle    time.Duration
 }
 
 type PublicDownload struct {
@@ -41,6 +42,14 @@ type publicResolveResponse struct {
 }
 
 func NewPublicClient(baseURL, encodedKey string) (*PublicClient, error) {
+	return NewPublicClientWithTimeouts(baseURL, encodedKey, Timeouts{})
+}
+
+func NewPublicClientWithTimeouts(baseURL, encodedKey string, timeouts Timeouts) (*PublicClient, error) {
+	timeouts, err := normalizeTimeouts(timeouts)
+	if err != nil {
+		return nil, err
+	}
 	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return nil, fmt.Errorf("invalid Public Cache URL %q", baseURL)
@@ -58,11 +67,9 @@ func NewPublicClient(baseURL, encodedKey string) (*PublicClient, error) {
 	return &PublicClient{
 		baseURL: parsed,
 		key:     key,
+		idle:    timeouts.TransferIdle,
 		http: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: 2 * time.Second,
-			},
+			Transport: transportWithMetadataTimeout(timeouts.Metadata),
 			CheckRedirect: func(request *http.Request, via []*http.Request) error {
 				if len(via) >= 5 {
 					return errors.New("Public Cache redirect limit exceeded")
@@ -93,6 +100,7 @@ func (client *PublicClient) Resolve(ctx context.Context, expected publictrust.Ex
 	if err != nil {
 		return publictrust.Publication{}, publictrust.Envelope{}, "", fmt.Errorf("resolve Public Cache: %w", err)
 	}
+	response.Body = withIdleReadTimeout(response.Body, client.idle)
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone || response.StatusCode == http.StatusConflict {
 		return publictrust.Publication{}, publictrust.Envelope{}, "", ErrMiss
@@ -158,5 +166,5 @@ func (client *PublicClient) Get(ctx context.Context, expected publictrust.Expect
 		}
 		return PublicDownload{}, fmt.Errorf("Public Cache artifact returned HTTP %d", response.StatusCode)
 	}
-	return PublicDownload{Publication: publication, Envelope: envelope, Body: response.Body}, nil
+	return PublicDownload{Publication: publication, Envelope: envelope, Body: withIdleReadTimeout(response.Body, client.idle)}, nil
 }

@@ -14,7 +14,9 @@ func TestRunInjectsScopedTurboAndActionsConnections(t *testing.T) {
 	binary := buildLayerCache(t)
 	address := availableAddress(t)
 	configPath := filepath.Join(root, "config.json")
-	runBinary(t, binary,
+	// A non-Git build can explicitly select its configured project. Repository
+	// discovery in the acceptance suite's own checkout must not supply its scope.
+	runBinaryInDirectory(t, root, binary,
 		"setup", "--config", configPath,
 		"--data-dir", filepath.Join(root, "cache"),
 		"--listen", address,
@@ -29,7 +31,7 @@ func TestRunInjectsScopedTurboAndActionsConnections(t *testing.T) {
 
 	environmentFile := filepath.Join(root, "environment.json")
 	script := `printf '{"runId":"%s","turboApi":"%s","turboToken":"%s","turboTeam":"%s","actionsUrl":"%s","actionsToken":"%s"}' "$LAYER_CACHE_RUN_ID" "$TURBO_API" "$TURBO_TOKEN" "$TURBO_TEAM" "$ACTIONS_CACHE_URL" "$ACTIONS_RUNTIME_TOKEN" > "$1"`
-	runBinary(t, binary, "run", "--config", configPath, "--", "sh", "-c", script, "layercache-run", environmentFile)
+	runBinaryInDirectory(t, root, binary, "run", "--config", configPath, "--", "sh", "-c", script, "layercache-run", environmentFile)
 
 	contents, err := os.ReadFile(environmentFile)
 	if err != nil {
@@ -49,7 +51,7 @@ func TestRunInjectsScopedTurboAndActionsConnections(t *testing.T) {
 	if got.RunID == "" || got.TurboAPI != "http://"+address || got.TurboTeam != "github.com/acme/widget" || got.ActionsURL != "http://"+address+"/" {
 		t.Fatalf("injected environment = %+v", got)
 	}
-	if got.TurboToken != got.ActionsToken || !strings.HasPrefix(got.TurboToken, "lc1.") {
+	if got.TurboToken == got.ActionsToken || !strings.HasPrefix(got.TurboToken, "lc2.") || !strings.HasPrefix(got.ActionsToken, "lc2.") {
 		t.Fatalf("workspace tokens = %q and %q", got.TurboToken, got.ActionsToken)
 	}
 }

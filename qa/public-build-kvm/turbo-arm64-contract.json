@@ -1,0 +1,27 @@
+{
+  "protocol": "layercache.public-build/v1",
+  "platform": "linux/arm64",
+  "agent": "/sbin/layercache-public-build-guest",
+  "builder": "turbo-2.10.12-kvm-qa",
+  "toolchain": "node-24.13.0-npm-11.6.2",
+  "controlPort": "org.layercache.public-build.1",
+  "maxProcesses": 128,
+  "features": [
+    "read-only-source",
+    "ephemeral-work-disk",
+    "process-limit",
+    "streamed-output",
+    "no-network"
+  ],
+  "recipes": [
+    {
+      "integration": "turbo",
+      "target": "@qa/app#build",
+      "digest": "sha256:b7ec1ceccd08bc82f5300c75e12d65a8c5918df446cf2fdae81040dd3482232b",
+      "mediaType": "application/vnd.layercache.turbo",
+      "resultFormat": "native-blob",
+      "executor": "turbo-capture-v1",
+      "maxBytes": 16777216
+    }
+  ]
+}

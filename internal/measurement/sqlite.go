@@ -19,6 +19,10 @@ type SQLiteRepository struct {
 	database *sql.DB
 }
 
+type outcomeExecutor interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // OpenSQLiteRepository opens or creates a measurement event database at path.
 func OpenSQLiteRepository(path string) (*SQLiteRepository, error) {
 	if path == "" {
@@ -48,6 +52,8 @@ func (repository *SQLiteRepository) initialize() error {
 		`PRAGMA synchronous = NORMAL`,
 		`CREATE TABLE IF NOT EXISTS measurement_final_outcomes_v1 (
 			run_id TEXT NOT NULL,
+			workspace_id TEXT NOT NULL DEFAULT '',
+			integration TEXT NOT NULL DEFAULT '',
 			work_id TEXT NOT NULL,
 			dependencies_json BLOB NOT NULL,
 			artifact_id TEXT NOT NULL,
@@ -66,12 +72,80 @@ func (repository *SQLiteRepository) initialize() error {
 			downloaded_bytes INTEGER NOT NULL,
 			uploaded_bytes INTEGER NOT NULL,
 			degraded INTEGER NOT NULL CHECK (degraded IN (0, 1)),
+			eligible_units INTEGER NOT NULL DEFAULT 0 CHECK (eligible_units >= 0),
+			hit_units INTEGER NOT NULL DEFAULT 0 CHECK (hit_units >= 0 AND hit_units <= eligible_units),
 			PRIMARY KEY (run_id, work_id)
 		) WITHOUT ROWID`,
+		`CREATE TABLE IF NOT EXISTS measurement_turbo_observations_v1 (
+			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+			run_id TEXT NOT NULL,
+			artifact_id TEXT NOT NULL,
+			result TEXT NOT NULL,
+			source TEXT NOT NULL,
+			started_at BLOB NOT NULL,
+			finished_at BLOB NOT NULL,
+			lookup_ns INTEGER NOT NULL,
+			download_ns INTEGER NOT NULL,
+			verification_ns INTEGER NOT NULL,
+			restore_ns INTEGER NOT NULL,
+			upload_ns INTEGER NOT NULL,
+			downloaded_bytes INTEGER NOT NULL,
+			uploaded_bytes INTEGER NOT NULL,
+			degraded INTEGER NOT NULL CHECK (degraded IN (0, 1))
+		)`,
+		`CREATE INDEX IF NOT EXISTS measurement_turbo_observations_run_v1
+			ON measurement_turbo_observations_v1 (run_id, artifact_id, sequence)`,
 	}
 	for _, statement := range statements {
 		if _, err := repository.database.Exec(statement); err != nil {
 			return fmt.Errorf("initialize measurement database: %w", err)
+		}
+	}
+	if err := repository.ensureFinalOutcomeColumns(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (repository *SQLiteRepository) ensureFinalOutcomeColumns() error {
+	rows, err := repository.database.Query(`PRAGMA table_info(measurement_final_outcomes_v1)`)
+	if err != nil {
+		return fmt.Errorf("inspect measurement database columns: %w", err)
+	}
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var sequence int
+		var name, dataType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := rows.Scan(&sequence, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("inspect measurement database column: %w", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close measurement database column inspection: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect measurement database columns: %w", err)
+	}
+	additions := []struct {
+		name       string
+		definition string
+	}{
+		{name: "workspace_id", definition: `TEXT NOT NULL DEFAULT ''`},
+		{name: "integration", definition: `TEXT NOT NULL DEFAULT ''`},
+		{name: "eligible_units", definition: `INTEGER NOT NULL DEFAULT 0 CHECK (eligible_units >= 0)`},
+		{name: "hit_units", definition: `INTEGER NOT NULL DEFAULT 0 CHECK (hit_units >= 0 AND hit_units <= eligible_units)`},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := repository.database.Exec(`ALTER TABLE measurement_final_outcomes_v1 ADD COLUMN ` + addition.name + ` ` + addition.definition); err != nil {
+			return fmt.Errorf("add measurement database column %s: %w", addition.name, err)
 		}
 	}
 	return nil
@@ -92,6 +166,99 @@ func (repository *SQLiteRepository) Record(outcome FinalOutcome) error {
 	if err := validateOutcome(outcome); err != nil {
 		return err
 	}
+	return insertFinalOutcome(repository.database, outcome, true)
+}
+
+// EnrichActionsMiss atomically adds producer and upload measurements to one
+// existing Actions lookup miss.
+func (repository *SQLiteRepository) EnrichActionsMiss(completion ActionsMissCompletion) error {
+	if err := validateActionsMissCompletion(completion); err != nil {
+		return err
+	}
+	transaction, err := repository.database.Begin()
+	if err != nil {
+		return fmt.Errorf("begin Actions miss completion: %w", err)
+	}
+	defer transaction.Rollback()
+
+	var encodedLookupFinish []byte
+	err = transaction.QueryRow(`
+		SELECT finished_at
+		FROM measurement_final_outcomes_v1
+		WHERE run_id = ? AND work_id = ? AND integration = 'actions' AND result = 'miss'`,
+		completion.RunID, completion.WorkID,
+	).Scan(&encodedLookupFinish)
+	if errors.Is(err, sql.ErrNoRows) {
+		return actionsMissNotFound(completion)
+	}
+	if err != nil {
+		return fmt.Errorf("load Actions miss outcome: %w", err)
+	}
+	var lookupFinishedAt time.Time
+	if err := lookupFinishedAt.UnmarshalBinary(encodedLookupFinish); err != nil {
+		return fmt.Errorf("decode Actions miss lookup finish: %w", err)
+	}
+	if err := validateActionsMissCompletionOrder(FinalOutcome{FinishedAt: lookupFinishedAt}, completion); err != nil {
+		return err
+	}
+	encodedCompletionFinish, err := completion.FinishedAt.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("encode Actions miss completion finish: %w", err)
+	}
+	result, err := transaction.Exec(`
+		UPDATE measurement_final_outcomes_v1
+		SET finished_at = ?, execution_duration_ns = ?, upload_ns = ?, uploaded_bytes = ?
+		WHERE run_id = ? AND work_id = ? AND integration = 'actions' AND result = 'miss'
+			AND finished_at = ?`,
+		encodedCompletionFinish,
+		int64(completion.ExecutionDuration),
+		int64(completion.UploadDuration),
+		completion.UploadedBytes,
+		completion.RunID,
+		completion.WorkID,
+		encodedLookupFinish,
+	)
+	if err != nil {
+		return fmt.Errorf("enrich Actions miss outcome: %w", err)
+	}
+	written, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("confirm Actions miss completion: %w", err)
+	}
+	if written != 1 {
+		return actionsMissNotFound(completion)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit Actions miss completion: %w", err)
+	}
+	return nil
+}
+
+// LatestBuildkitBaseline returns the most recent observed cold execution for
+// the same stable BuildKit graph. A warm build uses it as producer duration;
+// absence remains unknown rather than being estimated from the warm solve.
+func (repository *SQLiteRepository) LatestBuildkitBaseline(artifactID, compatibilityID string) (*time.Duration, error) {
+	var nanoseconds int64
+	err := repository.database.QueryRow(`
+		SELECT execution_duration_ns
+		FROM measurement_final_outcomes_v1
+		WHERE integration = 'buildkit' AND artifact_id = ? AND compatibility_id = ?
+			AND result = 'miss' AND execution_duration_ns IS NOT NULL
+		ORDER BY started_at DESC LIMIT 1`, artifactID, compatibilityID).Scan(&nanoseconds)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read BuildKit cold baseline: %w", err)
+	}
+	duration := time.Duration(nanoseconds)
+	return &duration, nil
+}
+
+func insertFinalOutcome(executor outcomeExecutor, outcome FinalOutcome, ignoreConflict bool) error {
+	if err := validateOutcome(outcome); err != nil {
+		return err
+	}
 
 	dependencies, err := json.Marshal(outcome.Dependencies)
 	if err != nil {
@@ -106,16 +273,21 @@ func (repository *SQLiteRepository) Record(outcome FinalOutcome) error {
 		return fmt.Errorf("encode measurement finish: %w", err)
 	}
 
-	result, err := repository.database.Exec(`
+	statement := `
 		INSERT INTO measurement_final_outcomes_v1 (
-			run_id, work_id, dependencies_json, artifact_id, compatibility_id,
+			run_id, workspace_id, integration, work_id, dependencies_json, artifact_id, compatibility_id,
 			result, source, started_at, finished_at,
 			producer_duration_ns, execution_duration_ns,
 			lookup_ns, download_ns, verification_ns, restore_ns, upload_ns,
-			downloaded_bytes, uploaded_bytes, degraded
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (run_id, work_id) DO NOTHING`,
+			downloaded_bytes, uploaded_bytes, degraded, eligible_units, hit_units
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if ignoreConflict {
+		statement += ` ON CONFLICT (run_id, work_id) DO NOTHING`
+	}
+	result, err := executor.Exec(statement,
 		outcome.RunID,
+		outcome.WorkspaceID,
+		outcome.Integration,
 		outcome.WorkID,
 		dependencies,
 		outcome.ArtifactID,
@@ -134,6 +306,8 @@ func (repository *SQLiteRepository) Record(outcome FinalOutcome) error {
 		outcome.Bytes.Downloaded,
 		outcome.Bytes.Uploaded,
 		outcome.Degraded,
+		outcome.EligibleUnits,
+		outcome.HitUnits,
 	)
 	if err != nil {
 		return fmt.Errorf("record measurement final outcome: %w", err)
@@ -142,7 +316,7 @@ func (repository *SQLiteRepository) Record(outcome FinalOutcome) error {
 	if err != nil {
 		return fmt.Errorf("confirm measurement final outcome: %w", err)
 	}
-	if written == 0 {
+	if ignoreConflict && written == 0 {
 		return fmt.Errorf("%w: run %q work %q", ErrFinalOutcomeAlreadyRecorded, outcome.RunID, outcome.WorkID)
 	}
 	return nil
@@ -173,11 +347,11 @@ func (repository *SQLiteRepository) PeriodReport(from, to time.Time) (PeriodRepo
 
 const selectOutcomes = `
 	SELECT
-		run_id, work_id, dependencies_json, artifact_id, compatibility_id,
+		run_id, workspace_id, integration, work_id, dependencies_json, artifact_id, compatibility_id,
 		result, source, started_at, finished_at,
 		producer_duration_ns, execution_duration_ns,
 		lookup_ns, download_ns, verification_ns, restore_ns, upload_ns,
-		downloaded_bytes, uploaded_bytes, degraded
+		downloaded_bytes, uploaded_bytes, degraded, eligible_units, hit_units
 	FROM measurement_final_outcomes_v1`
 
 func (repository *SQLiteRepository) replay(filter string, arguments ...any) (*Recorder, int, error) {
@@ -225,6 +399,8 @@ func scanFinalOutcome(row rowScanner) (FinalOutcome, error) {
 
 	if err := row.Scan(
 		&outcome.RunID,
+		&outcome.WorkspaceID,
+		&outcome.Integration,
 		&outcome.WorkID,
 		&dependencies,
 		&outcome.ArtifactID,
@@ -243,6 +419,8 @@ func scanFinalOutcome(row rowScanner) (FinalOutcome, error) {
 		&outcome.Bytes.Downloaded,
 		&outcome.Bytes.Uploaded,
 		&degraded,
+		&outcome.EligibleUnits,
+		&outcome.HitUnits,
 	); err != nil {
 		return FinalOutcome{}, fmt.Errorf("decode measurement final outcome: %w", err)
 	}

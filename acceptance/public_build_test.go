@@ -12,9 +12,15 @@ import (
 )
 
 type publicBuildView struct {
-	ID          string `json:"id"`
-	State       string `json:"state"`
-	Failure     string `json:"failure"`
+	ID      string `json:"id"`
+	State   string `json:"state"`
+	Failure string `json:"failure"`
+	Request struct {
+		Inputs []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"inputs"`
+	} `json:"request"`
 	Publication *struct {
 		PublicCachePublication string `json:"publicCachePublication"`
 	} `json:"publication"`
@@ -32,10 +38,19 @@ type publicBuildLeaseResult struct {
 }
 
 func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) {
+	const (
+		compileTarget = "@acme/widget#compile"
+		cancelTarget  = "@acme/widget#cancel-me"
+		failTarget    = "@acme/widget#fail-me"
+	)
 	root := t.TempDir()
 	binary := buildLayerCache(t)
 	address := availableAddress(t)
 	configPath := filepath.Join(root, "public.json")
+	githubAPI := acceptingGitHubAPI(t)
+	compileRecipe := publicFixtureRecipe("turbo", compileTarget)
+	cancelRecipe := publicFixtureRecipe("turbo", cancelTarget)
+	failRecipe := publicFixtureRecipe("turbo", failTarget)
 	runBinary(t, binary,
 		"setup", "--config", configPath,
 		"--data-dir", filepath.Join(root, "public-cache"),
@@ -43,7 +58,12 @@ func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) 
 		"--role", "public",
 		"--project", "github.com/acme/widget",
 		"--publisher-token", "publisher-secret",
-		"--public-build-repository", "https://github.com/acme/widget",
+		"--github-api-url", githubAPI,
+		"--public-build-repository", publicFixtureRepository,
+		"--public-build-approved-ref", "refs/heads/main",
+		"--public-build-recipe", compileRecipe,
+		"--public-build-recipe", cancelRecipe,
+		"--public-build-recipe", failRecipe,
 		"--max-size", "10485760",
 		"--non-interactive", "--json",
 	)
@@ -61,11 +81,14 @@ func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) 
 
 	requestArgs := []string{
 		"public-build", "request", "--config", configPath,
-		"--repository", "https://github.com/acme/widget",
-		"--commit", "0123456789abcdef0123456789abcdef01234567",
+		"--repository", publicFixtureRepository,
+		"--commit", publicFixtureCommit,
 		"--integration", "turbo",
-		"--target", "compile",
-		"--recipe", "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"--target", compileTarget,
+		"--recipe", compileRecipe,
+		"--input", "compatibility=linux-amd64-acceptance-v1",
+		"--input", "feature=enabled",
+		"--input", "runtime=node@24",
 		"--platform", "linux/amd64",
 		"--cpu-millis", "1000",
 		"--memory-bytes", "1073741824",
@@ -79,6 +102,10 @@ func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) 
 	}
 	if requested.Reused || requested.Build.ID == "" || requested.Build.State != "queued" {
 		t.Fatalf("request result = %#v", requested)
+	}
+	if len(requested.Build.Request.Inputs) != 3 || requested.Build.Request.Inputs[0].Name != "compatibility" ||
+		requested.Build.Request.Inputs[1].Name != "feature" || requested.Build.Request.Inputs[2].Name != "runtime" {
+		t.Fatalf("canonical declared inputs = %#v", requested.Build.Request.Inputs)
 	}
 
 	var duplicate publicBuildRequestResult
@@ -119,13 +146,18 @@ func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) 
 		"public", "publish", "--config", configPath,
 		"--file", artifactFile,
 		"--hash", "public-build-output",
-		"--repository", "https://github.com/acme/widget",
-		"--commit", "0123456789abcdef0123456789abcdef01234567",
-		"--recipe", "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"--repository", publicFixtureRepository,
+		"--commit", publicFixtureCommit,
+		"--recipe", compileRecipe,
+		"--target", compileTarget,
 		"--platform", "linux/amd64",
+		"--compatibility", "linux-amd64-acceptance-v1",
 		"--toolchain", "turbo@2.10.9",
 		"--builder", "layercache-worker@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		"--builder-image-digest", "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		"--build-id", requested.Build.ID,
+		"--worker-id", lease.WorkerID,
+		"--lease-token", lease.LeaseToken,
 		"--duration", "2300", "--json",
 	)
 	if err := json.Unmarshal(publishOutput, &published); err != nil || published.Identity == "" {
@@ -160,6 +192,9 @@ func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) 
 	if persisted.State != "succeeded" || persisted.Publication == nil || persisted.Publication.PublicCachePublication != published.Identity {
 		t.Fatalf("persisted build = %#v", persisted)
 	}
+	if len(persisted.Request.Inputs) != 3 || persisted.Request.Inputs[2].Value != "node@24" {
+		t.Fatalf("persisted declared inputs = %#v", persisted.Request.Inputs)
+	}
 	var logs struct {
 		Logs []struct {
 			Message string `json:"message"`
@@ -177,11 +212,8 @@ func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) 
 	}
 
 	cancelArgs := append([]string(nil), requestArgs...)
-	for index := range cancelArgs {
-		if cancelArgs[index] == "compile" {
-			cancelArgs[index] = "cancel-me"
-		}
-	}
+	replacePublicBuildFlagValue(cancelArgs, "--target", cancelTarget)
+	replacePublicBuildFlagValue(cancelArgs, "--recipe", cancelRecipe)
 	var cancellationCandidate publicBuildRequestResult
 	if output := runBinary(t, binary, cancelArgs...); json.Unmarshal(output, &cancellationCandidate) != nil {
 		t.Fatalf("decode cancellation candidate: %s", output)
@@ -196,11 +228,8 @@ func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) 
 	}
 
 	failArgs := append([]string(nil), requestArgs...)
-	for index := range failArgs {
-		if failArgs[index] == "compile" {
-			failArgs[index] = "fail-me"
-		}
-	}
+	replacePublicBuildFlagValue(failArgs, "--target", failTarget)
+	replacePublicBuildFlagValue(failArgs, "--recipe", failRecipe)
 	var failureCandidate publicBuildRequestResult
 	if output := runBinary(t, binary, failArgs...); json.Unmarshal(output, &failureCandidate) != nil {
 		t.Fatalf("decode failure candidate: %s", output)
@@ -257,7 +286,17 @@ func TestPublicBuildControlPlaneCompletesPersistsAndFencesClients(t *testing.T) 
 }
 
 func publicBuildRequestJSON() string {
-	return `{"repository":"https://github.com/acme/widget","commit":"0123456789abcdef0123456789abcdef01234567","integration":"turbo","target":"compile","recipeDigest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","platform":"linux/amd64","resources":{"cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":2147483648,"timeoutMilliseconds":120000}}`
+	return `{"repository":"` + publicFixtureRepository + `","commit":"` + publicFixtureCommit + `","integration":"turbo","target":"@acme/widget#compile","recipeDigest":"` + publicFixtureRecipe("turbo", "@acme/widget#compile") + `","platform":"linux/amd64","inputs":[{"name":"runtime","value":"node@24"}],"resources":{"cpuMillis":1000,"memoryBytes":1073741824,"diskBytes":2147483648,"timeoutMilliseconds":120000}}`
+}
+
+func replacePublicBuildFlagValue(arguments []string, name, value string) {
+	for index := 0; index+1 < len(arguments); index++ {
+		if arguments[index] == name {
+			arguments[index+1] = value
+			return
+		}
+	}
+	panic("missing Public Build test flag " + name)
 }
 
 func publicBuildHTTPStatus(t *testing.T, address, token, method, path, body string) int {

@@ -23,22 +23,45 @@ inputs:
   endpoint:
     description: Layer Cache v1 endpoint. Use HTTPS, or HTTP only for a loopback daemon.
     required: true
+  project:
+    description: >-
+      Team Cache project used as the GitHub OIDC audience. When set, the Action requests a short-lived token
+      from Layer Cache. Grant the job id-token: write.
+    required: false
   token:
-    description: Short-lived Layer Cache token scoped to this Team Cache project. The action masks it in logs.
-    required: true
+    description: >-
+      Project-scoped Layer Cache token fallback. The Action masks it in logs. Prefer project with GitHub OIDC.
+    required: false
   compatibility:
     description: >-
       Output compatibility identity. Defaults to the Node job OS and architecture plus schema1. Set this when
       libc, runtime, or toolchain ABI affects cached outputs.
     required: false
+  lookup-timeout-seconds:
+    description: Maximum time to wait for verified lookup response metadata.
+    required: false
+    default: "2"
   public-cache-mode:
     description: >-
-      Public Cache restore policy. The only supported value is "disabled". The v1 archive protocol does not
-      carry signed Public Build provenance, so this action will reject any other value until a separate
-      verified-artifact mode checks the signed manifest and complete artifact digest before extraction.
-      The supplied token must not grant unverified Public Cache reads.
+      Public Cache restore policy. Use "verified" to require an Ed25519-signed full publication identity,
+      complete archive digest verification, and safe member validation before extraction.
     required: false
     default: disabled
+  public-trust-key:
+    description: URL-safe base64 Ed25519 Public Cache verification key. Required in verified mode.
+    required: false
+  public-recipe-digest:
+    description: Layer Cache-managed Action recipe digest expected in signed provenance. Required in verified mode.
+    required: false
+  public-platform:
+    description: Signed Public Build platform. Defaults to the current runner OS and architecture.
+    required: false
+  public-toolchain:
+    description: Signed Public Build toolchain identity. Defaults to actions/cache@6.2.0.
+    required: false
+  public-builder:
+    description: Exact trusted Public Build builder identity. Required in verified mode.
+    required: false
 
 outputs:
   cache-hit:

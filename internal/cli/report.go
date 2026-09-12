@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/layercache/layercache/internal/config"
@@ -39,7 +40,7 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	target := "http://" + cfg.Listen + "/v1/reports/" + url.PathEscape(*runID)
+	target := localRuntimeURL(cfg.Listen) + "/v1/reports/" + url.PathEscape(*runID)
 	var from, to time.Time
 	if hasPeriod {
 		from, err = time.Parse(time.RFC3339, *fromValue)
@@ -56,14 +57,14 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		query := make(url.Values, 2)
 		query.Set("from", from.Format(time.RFC3339Nano))
 		query.Set("to", to.Format(time.RFC3339Nano))
-		target = "http://" + cfg.Listen + "/v1/reports?" + query.Encode()
+		target = localRuntimeURL(cfg.Listen) + "/v1/reports?" + query.Encode()
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := newLocalCLIHTTPClient(5 * time.Second)
 	response, err := client.Do(request)
 	if err != nil {
 		return fmt.Errorf("read Layer Cache run report: %w", err)
@@ -83,10 +84,7 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		if *jsonOutput {
 			return json.NewEncoder(stdout).Encode(report)
 		}
-		_, err = fmt.Fprintf(stdout, "Layer Cache period %s to %s: %d/%d hits (%.0f%%), net estimate %s\n",
-			report.From.Format(time.RFC3339), report.To.Format(time.RFC3339), report.Hits, report.Eligible,
-			report.HitRate*100, formatEstimate(report.NetEstimatedBuildTimeSaved))
-		return err
+		return printPeriodReport(stdout, report)
 	}
 	var report measurement.RunReport
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&report); err != nil {
@@ -95,14 +93,110 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if *jsonOutput {
 		return json.NewEncoder(stdout).Encode(report)
 	}
-	_, err = fmt.Fprintf(stdout, "Layer Cache run %s: %d/%d hits (%.0f%%), net estimate %s\n",
-		report.RunID, report.Hits, report.Eligible, report.HitRate*100, formatEstimate(report.NetEstimatedBuildTimeSaved))
-	return err
+	return printRunReport(stdout, report)
 }
 
 func formatEstimate(estimate measurement.Estimate) string {
-	if estimate.Milliseconds == nil {
-		return "unavailable (" + string(estimate.Confidence) + " confidence)"
+	details := make([]string, 0, 3)
+	if estimate.Method != "" {
+		details = append(details, estimate.Method)
 	}
-	return fmt.Sprintf("%+dms (%s confidence)", *estimate.Milliseconds, estimate.Confidence)
+	details = append(details, string(estimate.Confidence)+" confidence")
+	if estimate.Total > 0 {
+		details = append(details, fmt.Sprintf("%d/%d known", estimate.Known, estimate.Total))
+	}
+	detail := strings.Join(details, "; ")
+	if estimate.Milliseconds == nil {
+		return "unavailable (" + detail + ")"
+	}
+	return fmt.Sprintf("%+dms (%s)", *estimate.Milliseconds, detail)
+}
+
+func printRunReport(output io.Writer, report measurement.RunReport) error {
+	if _, err := fmt.Fprintf(output, "Layer Cache run %s\n", report.RunID); err != nil {
+		return err
+	}
+	return printReportSummary(output, report.Hits, report.Eligible, report.Misses, report.HitRate,
+		report.Bytes, report.Sources, report.GrossAvoidedTaskTime, report.Timing,
+		report.NetEstimatedBuildTimeSaved, report.Degraded)
+}
+
+func printPeriodReport(output io.Writer, report measurement.PeriodReport) error {
+	if _, err := fmt.Fprintf(output, "Layer Cache period %s to %s (%d runs)\n",
+		report.From.Format(time.RFC3339), report.To.Format(time.RFC3339), report.Runs); err != nil {
+		return err
+	}
+	return printReportSummary(output, report.Hits, report.Eligible, report.Misses, report.HitRate,
+		report.Bytes, report.Sources, report.GrossAvoidedTaskTime, report.Timing,
+		report.NetEstimatedBuildTimeSaved, report.Degraded)
+}
+
+func printReportSummary(
+	output io.Writer,
+	hits int,
+	eligible int,
+	misses int,
+	hitRate float64,
+	bytes measurement.Bytes,
+	sources []measurement.SourceReport,
+	gross measurement.Estimate,
+	timing measurement.TimingReport,
+	net measurement.Estimate,
+	degraded bool,
+) error {
+	if _, err := fmt.Fprintf(output, "Cache outcomes: %d/%d hits (%.0f%%); misses: %d\n",
+		hits, eligible, hitRate*100, misses); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "Bytes: %s downloaded; %s uploaded\n",
+		formatByteCount(bytes.Downloaded), formatByteCount(bytes.Uploaded)); err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		if _, err := fmt.Fprintln(output, "Sources: none"); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintln(output, "Sources:"); err != nil {
+			return err
+		}
+		for _, source := range sources {
+			if _, err := fmt.Fprintf(output, "  %s: hits: %d; %s downloaded; %s uploaded\n",
+				formatReportSource(source.Source), source.Hits, formatByteCount(source.Downloaded),
+				formatByteCount(source.Uploaded)); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := fmt.Fprintf(output, "Gross avoided task time: %s\n", formatEstimate(gross)); err != nil {
+		return err
+	}
+	totalOverhead := timing.LookupMS + timing.DownloadMS + timing.VerificationMS + timing.RestoreMS + timing.UploadMS
+	if _, err := fmt.Fprintf(output,
+		"Measured cache overhead: %+dms (lookup %dms; download %dms; verification %dms; restore %dms; upload %dms)\n",
+		totalOverhead, timing.LookupMS, timing.DownloadMS, timing.VerificationMS, timing.RestoreMS, timing.UploadMS); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "Net estimated build time saved: %s\n", formatEstimate(net)); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(output, "Degraded: %s\n", yesNo(degraded))
+	return err
+}
+
+func formatReportSource(source measurement.Source) string {
+	switch source {
+	case measurement.SourceNone:
+		return "No cache source"
+	case measurement.SourceLocalCache:
+		return "Local Cache"
+	case measurement.SourceTeamCache:
+		return "Team Cache"
+	case measurement.SourcePublicCache:
+		return "Public Cache"
+	case measurement.SourceUnattributed:
+		return "Unattributed"
+	default:
+		return string(source)
+	}
 }

@@ -147,7 +147,7 @@ func TestPutFailureDoesNotRemoveExistingDeduplicatedBlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantStats := Stats{UsageBytes: int64(len(body)), Artifacts: 1, Entries: 1}
+	wantStats := Stats{UsageBytes: int64(len(body)), MetadataBytes: stats.MetadataBytes, Artifacts: 1, Entries: 1}
 	if stats != wantStats {
 		t.Fatalf("stats after failed shared-digest Put = %+v, want %+v", stats, wantStats)
 	}
@@ -219,6 +219,39 @@ func TestPutRepairsCorruptCanonicalBlobForMatchingLogicalEntry(t *testing.T) {
 		t.Fatalf("Put repair = created %v, entry %+v; want existing digest", created, entry)
 	}
 	assertRecoveryContents(t, store, key, body)
+}
+
+func TestDeduplicatedPutRepairsCanonicalBlobBeforeAddingNewLogicalEntry(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, t.TempDir(), 1<<20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	body := []byte("shared canonical artifact")
+	digest := fmt.Sprintf("%x", sha256.Sum256(body))
+	first := recoveryTestKey("shared-corrupt-first")
+	second := recoveryTestKey("shared-corrupt-second")
+	if _, _, err := store.Put(ctx, first, Metadata{}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.blobPath(digest), []byte("corrupted shared bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Get(ctx, first); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Get before shared repair error = %v, want ErrCorrupt", err)
+	}
+
+	entry, created, err := store.Put(ctx, second, Metadata{}, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || entry.Digest != digest {
+		t.Fatalf("deduplicated repair = created %v, entry %+v", created, entry)
+	}
+	assertRecoveryContents(t, store, first, body)
+	assertRecoveryContents(t, store, second, body)
 }
 
 func TestPutCannotRepairMissingBlobWithConflictingBytes(t *testing.T) {

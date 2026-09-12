@@ -151,6 +151,124 @@ func TestSQLiteRepositoryAtomicallyRejectsDuplicateFinalOutcomes(t *testing.T) {
 	}
 }
 
+func TestSQLiteRepositoryEnrichesOneExistingActionsMiss(t *testing.T) {
+	t.Parallel()
+
+	databasePath := filepath.Join(t.TempDir(), "measurement.sqlite")
+	repository, err := measurement.OpenSQLiteRepository(databasePath)
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	startedAt := time.Date(2026, time.August, 31, 10, 0, 0, 0, time.UTC)
+	lookupFinishedAt := startedAt.Add(20 * time.Millisecond)
+	if err := repository.Record(measurement.FinalOutcome{
+		RunID: "run-actions", Integration: measurement.IntegrationActions, WorkID: "restore-1",
+		Result: measurement.ResultMiss, Source: measurement.SourceNone,
+		StartedAt: startedAt, FinishedAt: lookupFinishedAt,
+		Timing: measurement.Timing{Lookup: 20 * time.Millisecond},
+	}); err != nil {
+		t.Fatalf("record Actions miss: %v", err)
+	}
+	completion := measurement.ActionsMissCompletion{
+		RunID: "run-actions", WorkID: "restore-1", FinishedAt: startedAt.Add(3 * time.Second),
+		ExecutionDuration: 2 * time.Second,
+		UploadDuration:    980 * time.Millisecond,
+		UploadedBytes:     8192,
+	}
+	if err := repository.EnrichActionsMiss(completion); err != nil {
+		t.Fatalf("enrich Actions miss: %v", err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatalf("close repository: %v", err)
+	}
+
+	repository, err = measurement.OpenSQLiteRepository(databasePath)
+	if err != nil {
+		t.Fatalf("reopen repository: %v", err)
+	}
+	t.Cleanup(func() { _ = repository.Close() })
+	report, err := repository.RunReport(completion.RunID)
+	if err != nil {
+		t.Fatalf("read enriched run: %v", err)
+	}
+	if len(report.Outcomes) != 1 {
+		t.Fatalf("outcomes = %d, want one enriched outcome", len(report.Outcomes))
+	}
+	outcome := report.Outcomes[0]
+	if !outcome.FinishedAt.Equal(completion.FinishedAt) || outcome.ExecutionDurationMS == nil ||
+		*outcome.ExecutionDurationMS != 2000 || outcome.Timing.LookupMS != 20 || outcome.Timing.UploadMS != 980 ||
+		outcome.Bytes.Uploaded != 8192 {
+		t.Fatalf("persisted enriched outcome = %#v", outcome)
+	}
+}
+
+func TestSQLiteRepositoryRejectsUnknownOrOutOfOrderActionsMissCompletion(t *testing.T) {
+	t.Parallel()
+
+	repository, err := measurement.OpenSQLiteRepository(filepath.Join(t.TempDir(), "measurement.sqlite"))
+	if err != nil {
+		t.Fatalf("open repository: %v", err)
+	}
+	t.Cleanup(func() { _ = repository.Close() })
+	startedAt := time.Date(2026, time.August, 31, 11, 0, 0, 0, time.UTC)
+	if err := repository.Record(measurement.FinalOutcome{
+		RunID: "run-actions", Integration: measurement.IntegrationActions, WorkID: "restore-1",
+		Result: measurement.ResultMiss, Source: measurement.SourceNone,
+		StartedAt: startedAt, FinishedAt: startedAt.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	missing := measurement.ActionsMissCompletion{
+		RunID: "run-actions", WorkID: "missing", FinishedAt: startedAt.Add(2 * time.Second),
+	}
+	if err := repository.EnrichActionsMiss(missing); !errors.Is(err, measurement.ErrActionsMissNotFound) {
+		t.Fatalf("unknown Actions miss error = %v, want ErrActionsMissNotFound", err)
+	}
+	outOfOrder := missing
+	outOfOrder.WorkID = "restore-1"
+	outOfOrder.FinishedAt = startedAt
+	if err := repository.EnrichActionsMiss(outOfOrder); err == nil {
+		t.Fatal("out-of-order Actions miss completion was accepted")
+	}
+
+	report, err := repository.RunReport("run-actions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Outcomes) != 1 || report.Outcomes[0].ExecutionDurationMS != nil ||
+		!report.Outcomes[0].FinishedAt.Equal(startedAt.Add(time.Second)) {
+		t.Fatalf("rejected completion changed outcomes: %#v", report.Outcomes)
+	}
+}
+
+func TestSQLiteRepositoryReturnsBuildkitColdBaseline(t *testing.T) {
+	t.Parallel()
+	repository, err := measurement.OpenSQLiteRepository(filepath.Join(t.TempDir(), "measurements.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repository.Close() })
+	start := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	duration := 3 * time.Second
+	if err := repository.Record(measurement.FinalOutcome{
+		RunID: "cold", Integration: measurement.IntegrationBuildkit, WorkID: "build",
+		ArtifactID: "graph", CompatibilityID: "linux-amd64",
+		Result: measurement.ResultMiss, Source: measurement.SourceNone,
+		StartedAt: start, FinishedAt: start.Add(duration), ExecutionDuration: &duration,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := repository.LatestBuildkitBaseline("graph", "linux-amd64")
+	if err != nil || baseline == nil || *baseline != duration {
+		t.Fatalf("BuildKit baseline = %v, error = %v", baseline, err)
+	}
+	missing, err := repository.LatestBuildkitBaseline("other", "linux-amd64")
+	if err != nil || missing != nil {
+		t.Fatalf("missing BuildKit baseline = %v, error = %v", missing, err)
+	}
+}
+
 func TestSQLiteRepositoryUsesRecorderValidationAndNotFoundBehavior(t *testing.T) {
 	t.Parallel()
 

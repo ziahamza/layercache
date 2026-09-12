@@ -1,0 +1,8 @@
+{
+  "name": "layercache-turbo-minimum-fixture",
+  "private": true,
+  "packageManager": "pnpm@10.34.5",
+  "devDependencies": {
+    "turbo": "2.9.14"
+  }
+}

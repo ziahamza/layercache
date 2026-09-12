@@ -2,11 +2,14 @@ package remote_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/layercache/layercache/internal/remote"
 )
@@ -33,6 +36,68 @@ func TestTurboClientRequiresHTTPSExceptOnLoopback(t *testing.T) {
 		if _, err := remote.NewTurboClient(endpoint, "test-token"); err != nil {
 			t.Fatalf("NewTurboClient(%q): %v", endpoint, err)
 		}
+	}
+}
+
+func TestTurboClientUsesProgressIdleDeadlineInsteadOfWholeTransferDeadline(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		flusher := writer.(http.Flusher)
+		for _, chunk := range []string{"a", "b", "c", "d"} {
+			_, _ = writer.Write([]byte(chunk))
+			flusher.Flush()
+			time.Sleep(15 * time.Millisecond)
+		}
+	}))
+	defer server.Close()
+
+	client, err := remote.NewTurboClientForCompatibilityWithTimeouts(
+		server.URL, "team-token", "linux-amd64-schema1",
+		remote.Timeouts{Metadata: 25 * time.Millisecond, TransferIdle: 40 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	download, err := client.Get(context.Background(), "task-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer download.Body.Close()
+	body, err := io.ReadAll(download.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "abcd" {
+		t.Fatalf("body = %q, want abcd", body)
+	}
+}
+
+func TestTurboClientStopsStalledTransferAtIdleDeadline(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("a"))
+		writer.(http.Flusher).Flush()
+		time.Sleep(200 * time.Millisecond)
+		_, _ = writer.Write([]byte("b"))
+	}))
+	defer server.Close()
+
+	client, err := remote.NewTurboClientForCompatibilityWithTimeouts(
+		server.URL, "team-token", "linux-amd64-schema1",
+		remote.Timeouts{Metadata: 25 * time.Millisecond, TransferIdle: 30 * time.Millisecond},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	download, err := client.Get(context.Background(), "task-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer download.Body.Close()
+	if _, err := io.ReadAll(download.Body); !errors.Is(err, remote.ErrTransferIdle) {
+		t.Fatalf("stalled transfer error = %v, want ErrTransferIdle", err)
 	}
 }
 

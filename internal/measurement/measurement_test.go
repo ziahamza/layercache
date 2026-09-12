@@ -2,11 +2,100 @@ package measurement_test
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/layercache/layercache/internal/measurement"
 )
+
+func TestRecorderEnrichesOneExistingActionsMiss(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, time.August, 31, 8, 0, 0, 0, time.UTC)
+	lookupFinishedAt := startedAt.Add(10 * time.Millisecond)
+	recorder := measurement.NewRecorder()
+	if err := recorder.Record(measurement.FinalOutcome{
+		RunID: "run-actions", Integration: measurement.IntegrationActions, WorkID: "restore-1",
+		Result: measurement.ResultMiss, Source: measurement.SourceNone,
+		StartedAt: startedAt, FinishedAt: lookupFinishedAt,
+		Timing: measurement.Timing{Lookup: 10 * time.Millisecond},
+	}); err != nil {
+		t.Fatalf("record Actions miss: %v", err)
+	}
+
+	completion := measurement.ActionsMissCompletion{
+		RunID: "run-actions", WorkID: "restore-1", FinishedAt: startedAt.Add(2 * time.Second),
+		ExecutionDuration: 1500 * time.Millisecond,
+		UploadDuration:    490 * time.Millisecond,
+		UploadedBytes:     4096,
+	}
+	if err := recorder.EnrichActionsMiss(completion); err != nil {
+		t.Fatalf("enrich Actions miss: %v", err)
+	}
+
+	report, err := recorder.RunReport("run-actions")
+	if err != nil {
+		t.Fatalf("read enriched run: %v", err)
+	}
+	if len(report.Outcomes) != 1 {
+		t.Fatalf("outcomes = %d, want one enriched outcome", len(report.Outcomes))
+	}
+	outcome := report.Outcomes[0]
+	if !outcome.FinishedAt.Equal(completion.FinishedAt) || outcome.ExecutionDurationMS == nil ||
+		*outcome.ExecutionDurationMS != 1500 || outcome.Timing.LookupMS != 10 || outcome.Timing.UploadMS != 490 ||
+		outcome.Bytes.Uploaded != 4096 {
+		t.Fatalf("enriched outcome = %#v", outcome)
+	}
+}
+
+func TestRecorderRejectsInvalidOrUnknownActionsMissCompletion(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, time.August, 31, 9, 0, 0, 0, time.UTC)
+	recorder := measurement.NewRecorder()
+	if err := recorder.Record(measurement.FinalOutcome{
+		RunID: "run-actions", Integration: measurement.IntegrationActions, WorkID: "restore-1",
+		Result: measurement.ResultMiss, Source: measurement.SourceNone,
+		StartedAt: startedAt, FinishedAt: startedAt.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	valid := measurement.ActionsMissCompletion{
+		RunID: "run-actions", WorkID: "restore-1", FinishedAt: startedAt.Add(2 * time.Second),
+	}
+	invalid := []measurement.ActionsMissCompletion{
+		{},
+		{RunID: strings.Repeat("r", 257), WorkID: valid.WorkID, FinishedAt: valid.FinishedAt},
+		{RunID: valid.RunID, WorkID: strings.Repeat("w", 513), FinishedAt: valid.FinishedAt},
+		{RunID: valid.RunID, WorkID: valid.WorkID, FinishedAt: valid.FinishedAt, ExecutionDuration: -1},
+		{RunID: valid.RunID, WorkID: valid.WorkID, FinishedAt: valid.FinishedAt, UploadDuration: -1},
+		{RunID: valid.RunID, WorkID: valid.WorkID, FinishedAt: valid.FinishedAt, UploadedBytes: -1},
+		{RunID: valid.RunID, WorkID: valid.WorkID, FinishedAt: startedAt},
+	}
+	for _, completion := range invalid {
+		if err := recorder.EnrichActionsMiss(completion); err == nil {
+			t.Fatalf("invalid completion was accepted: %#v", completion)
+		}
+	}
+
+	missing := valid
+	missing.WorkID = "missing"
+	if err := recorder.EnrichActionsMiss(missing); !errors.Is(err, measurement.ErrActionsMissNotFound) {
+		t.Fatalf("unknown Actions miss error = %v, want ErrActionsMissNotFound", err)
+	}
+
+	report, err := recorder.RunReport(valid.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Outcomes[0].ExecutionDurationMS != nil || report.Outcomes[0].Bytes.Uploaded != 0 ||
+		!report.Outcomes[0].FinishedAt.Equal(startedAt.Add(time.Second)) {
+		t.Fatalf("rejected completion changed outcome: %#v", report.Outcomes[0])
+	}
+}
 
 func TestRunReportKeepsNegativeNetSavings(t *testing.T) {
 	t.Parallel()
@@ -269,6 +358,38 @@ func TestBacktestReportsUnknownTimingInsteadOfZeroSavings(t *testing.T) {
 	}
 }
 
+func TestBacktestAppliesQuotaAndReportsMissingFingerprintCoverage(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, time.August, 30, 17, 0, 0, 0, time.UTC)
+	work := func(id, artifact string, size int64) measurement.HistoricalWork {
+		return measurement.HistoricalWork{
+			WorkID: id, ArtifactID: artifact, CompatibilityID: "linux-amd64", ArtifactBytes: size,
+			ExecutionDuration: duration(100 * time.Millisecond),
+		}
+	}
+	history := []measurement.HistoricalRun{
+		{RunID: "produce-a", StartedAt: start, FinishedAt: start.Add(time.Second), Work: []measurement.HistoricalWork{work("a", "artifact-a", 60)}},
+		{RunID: "produce-b", StartedAt: start.Add(time.Minute), FinishedAt: start.Add(time.Minute + time.Second), Work: []measurement.HistoricalWork{work("b", "artifact-b", 60)}},
+		{RunID: "read-a", StartedAt: start.Add(2 * time.Minute), FinishedAt: start.Add(2*time.Minute + time.Second), Work: []measurement.HistoricalWork{work("a", "artifact-a", 60)}},
+		{RunID: "unknown", StartedAt: start.Add(3 * time.Minute), FinishedAt: start.Add(3*time.Minute + time.Second), Work: []measurement.HistoricalWork{{WorkID: "unknown"}}},
+	}
+	result, err := measurement.Backtest(history, measurement.BacktestPolicy{MaxBytes: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MaxBytes != 100 || result.Period.Hits != 0 || result.Period.Misses != 3 {
+		t.Fatalf("quota replay = max %d, %d hits/%d misses", result.MaxBytes, result.Period.Hits, result.Period.Misses)
+	}
+	if result.TotalWork != 4 || result.KnownFingerprints != 3 || result.FingerprintCoverage != 0.75 {
+		t.Fatalf("fingerprint coverage = %d/%d (%f)", result.KnownFingerprints, result.TotalWork, result.FingerprintCoverage)
+	}
+	unknown := result.Runs[3].Outcomes[0]
+	if unknown.Result != measurement.ResultUnknown || unknown.Source != measurement.SourceUnattributed {
+		t.Fatalf("missing fingerprint outcome = %+v", unknown)
+	}
+}
+
 func TestRunReportHasAStableJSONContract(t *testing.T) {
 	t.Parallel()
 
@@ -290,7 +411,7 @@ func TestRunReportHasAStableJSONContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal run report: %v", err)
 	}
-	const want = `{"schemaVersion":"1","runId":"json","startedAt":"2026-08-30T16:00:00Z","finishedAt":"2026-08-30T16:00:00.055Z","outcomes":[{"workId":"build","result":"miss","source":"none","startedAt":"2026-08-30T16:00:00Z","finishedAt":"2026-08-30T16:00:00.055Z","producerDurationMs":null,"executionDurationMs":50,"timing":{"lookupMs":5,"downloadMs":0,"verificationMs":0,"restoreMs":0,"uploadMs":0},"bytes":{"downloaded":0,"uploaded":123},"degraded":false}],"eligible":1,"hits":0,"misses":1,"hitRate":0,"grossAvoidedTaskTime":{"milliseconds":0,"method":"producerDuration","confidence":"high","known":0,"total":0},"netEstimatedBuildTimeSaved":{"milliseconds":-5,"method":"criticalPath","confidence":"medium","known":1,"total":1},"timing":{"lookupMs":5,"downloadMs":0,"verificationMs":0,"restoreMs":0,"uploadMs":0},"bytes":{"downloaded":0,"uploaded":123},"sources":[],"degraded":false}`
+	const want = `{"schemaVersion":"2","runId":"json","startedAt":"2026-08-30T16:00:00Z","finishedAt":"2026-08-30T16:00:00.055Z","outcomes":[{"workId":"build","result":"miss","source":"none","startedAt":"2026-08-30T16:00:00Z","finishedAt":"2026-08-30T16:00:00.055Z","producerDurationMs":null,"executionDurationMs":50,"timing":{"lookupMs":5,"downloadMs":0,"verificationMs":0,"restoreMs":0,"uploadMs":0},"bytes":{"downloaded":0,"uploaded":123},"degraded":false,"eligibleUnits":1,"hitUnits":0}],"groups":1,"eligible":1,"hits":0,"misses":1,"hitRate":0,"grossAvoidedTaskTime":{"milliseconds":0,"method":"producerDuration","confidence":"high","known":0,"total":0},"netEstimatedBuildTimeSaved":{"milliseconds":-5,"method":"criticalPath","confidence":"medium","known":1,"total":1},"timing":{"lookupMs":5,"downloadMs":0,"verificationMs":0,"restoreMs":0,"uploadMs":0},"bytes":{"downloaded":0,"uploaded":123},"sources":[],"degraded":false}`
 	if string(encoded) != want {
 		t.Fatalf("run report JSON changed\n got: %s\nwant: %s", encoded, want)
 	}

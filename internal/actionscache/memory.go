@@ -125,10 +125,17 @@ func (storage *MemoryStorage) Reserve(_ context.Context, request ReserveRequest)
 // Abort releases an incomplete in-memory reservation used by an interrupted
 // Local Cache warm.
 func (storage *MemoryStorage) Abort(_ context.Context, reservationID int64) error {
+	return storage.AbortScoped(context.Background(), reservationID, nil)
+}
+
+func (storage *MemoryStorage) AbortScoped(_ context.Context, reservationID int64, scope *Scope) error {
 	storage.mu.Lock()
 	defer storage.mu.Unlock()
 	reservation, found := storage.reservations[reservationID]
 	if !found {
+		return ErrNotFound
+	}
+	if !reservationScopeMatches(scope, reservation.identity.repository, reservation.identity.compatibility, reservation.identity.ref) {
 		return ErrNotFound
 	}
 	delete(storage.reservations, reservationID)
@@ -215,14 +222,15 @@ func (storage *MemoryStorage) Commit(_ context.Context, request CommitRequest) (
 	storage.nextSequence++
 	entry := &memoryEntry{
 		Entry: Entry{
-			ID:        reservation.id,
-			Key:       reservation.identity.key,
-			Version:   reservation.identity.version,
-			Ref:       reservation.identity.ref,
-			Size:      request.Size,
-			CreatedAt: time.Now().UTC(),
-			Origin:    origin,
-			Public:    publicMetadata,
+			ID:               reservation.id,
+			Key:              reservation.identity.key,
+			Version:          reservation.identity.version,
+			Ref:              reservation.identity.ref,
+			Size:             request.Size,
+			CreatedAt:        time.Now().UTC(),
+			ProducerDuration: cloneDuration(request.ProducerDuration),
+			Origin:           origin,
+			Public:           publicMetadata,
 		},
 		repository:    reservation.identity.repository,
 		compatibility: reservation.identity.compatibility,
@@ -288,6 +296,9 @@ func (storage *MemoryStorage) findNewest(request LookupRequest, ref, key string,
 		if entry.repository != request.Scope.Repository ||
 			entry.compatibility != request.Scope.Compatibility ||
 			entry.Ref != ref || entry.Version != request.Version {
+			continue
+		}
+		if entry.Public != nil && (len(request.Keys) == 0 || !exact || key != request.Keys[0] || entry.Key != request.Keys[0]) {
 			continue
 		}
 		matches := entry.Key == key

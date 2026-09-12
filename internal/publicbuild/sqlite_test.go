@@ -20,7 +20,9 @@ func TestSQLiteCoordinatorPersistsCompletedBuildLogsAndDeduplication(t *testing.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "public-builds.db")
 	coordinator := openSQLiteCoordinator(t, path)
-	requested, err := coordinator.Request(ctx, validRequest())
+	request := validRequest()
+	request.Inputs = []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-amd64-node@24"}, {Name: "feature", Value: "enabled"}, {Name: "runtime", Value: "node@24"}}
+	requested, err := coordinator.Request(ctx, request)
 	if err != nil {
 		t.Fatalf("request Public Build: %v", err)
 	}
@@ -57,12 +59,57 @@ func TestSQLiteCoordinatorPersistsCompletedBuildLogsAndDeduplication(t *testing.
 	if len(logs) != 1 || logs[0].Sequence != 1 || logs[0].Message != "using [REDACTED]" {
 		t.Fatalf("persisted logs = %#v", logs)
 	}
-	reused, err := reopened.Request(ctx, validRequest())
+	reused, err := reopened.Request(ctx, request)
 	if err != nil {
 		t.Fatalf("request completed identity after restart: %v", err)
 	}
 	if !reused.Reused || reused.Build.ID != completed.ID {
 		t.Fatalf("reused result = %#v, want build %q", reused, completed.ID)
+	}
+}
+
+func TestSQLiteCoordinatorQueuesRepairForUnavailableSucceededPublication(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	lookupErr := error(publicbuild.ErrPublicationNotFound)
+	config := testCoordinatorConfig(func() time.Time { return now })
+	config.Publications = publicbuild.PublicationIndexFunc(func(context.Context, publicbuild.BuildRequest) (publicbuild.ExistingPublication, error) {
+		return publicbuild.ExistingPublication{}, lookupErr
+	})
+	coordinator, err := publicbuild.OpenSQLiteCoordinator(filepath.Join(t.TempDir(), "public-builds.db"), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coordinator.Close()
+	request := validRequest()
+	first, err := coordinator.Request(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := coordinator.LeaseNext(ctx, localFakeWorker("worker", allIntegrations(), allPlatforms()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Complete(ctx, lease, testPublication("trusted-output")); err != nil {
+		t.Fatal(err)
+	}
+
+	lookupErr = publicbuild.ErrPublicationUnavailable
+	repair, err := coordinator.Request(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair.Reused || repair.Build.State != publicbuild.StateQueued || repair.Build.ID == first.Build.ID {
+		t.Fatalf("unavailable publication repair = %#v", repair)
+	}
+	retired, err := coordinator.Inspect(ctx, first.Build.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.State != publicbuild.StateFailed || retired.Publication != nil || retired.Failure == "" {
+		t.Fatalf("retired completed build = %#v", retired)
 	}
 }
 
@@ -112,6 +159,37 @@ func TestSQLiteCoordinatorRecoversRunningBuildAndRejectsStaleLease(t *testing.T)
 	}
 }
 
+func TestSQLiteLeaseNextUsesExactRecipeCapabilities(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	coordinator := openSQLiteCoordinator(t, filepath.Join(t.TempDir(), "public-builds.db"))
+	defer coordinator.Close()
+	unsupported := validRequest()
+	unsupported.Target = "@acme/widgets#unsupported"
+	unsupported.RecipeDigest = "sha256:" + strings.Repeat("c", 64)
+	if _, err := coordinator.Request(ctx, unsupported); err != nil {
+		t.Fatal(err)
+	}
+	supported := validRequest()
+	supported.Target = "@acme/widgets#supported"
+	queued, err := coordinator.Request(ctx, supported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := localFakeWorker("recipe-worker", allIntegrations(), []publicbuild.Platform{publicbuild.PlatformLinuxAMD64})
+	worker.Supported.Recipes = []publicbuild.WorkerRecipeCapability{{
+		Integration: supported.Integration, Target: supported.Target, RecipeDigest: supported.RecipeDigest,
+	}}
+	lease, err := coordinator.LeaseNext(ctx, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Build.ID != queued.Build.ID {
+		t.Fatalf("leased %q, want exact recipe-compatible build %q", lease.Build.ID, queued.Build.ID)
+	}
+}
+
 func TestSQLiteCoordinatorPersistsNeitherRejectedSecretsNorRawLeaseCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -131,6 +209,9 @@ func TestSQLiteCoordinatorPersistsNeitherRejectedSecretsNorRawLeaseCredentials(t
 	lease, err := coordinator.LeaseNext(ctx, localFakeWorker("worker", allIntegrations(), allPlatforms()))
 	if err != nil {
 		t.Fatalf("lease Public Build: %v", err)
+	}
+	if err := coordinator.AppendLog(ctx, lease, "worker echoed "+lease.Token); err != nil {
+		t.Fatalf("append lease credential to sanitized log: %v", err)
 	}
 	if err := coordinator.Close(); err != nil {
 		t.Fatalf("close coordinator: %v", err)
@@ -161,15 +242,16 @@ func TestSQLiteCoordinatorPreservesFIFOCompatibilityAcrossRestart(t *testing.T) 
 	path := filepath.Join(t.TempDir(), "public-builds.db")
 	coordinator := openSQLiteCoordinator(t, path)
 	arm := validRequest()
-	arm.Integration = publicbuild.IntegrationBuildKit
+	arm.Integration = publicbuild.IntegrationActions
 	arm.Platform = publicbuild.PlatformLinuxARM64
-	arm.Target = "arm-runtime"
+	arm.Inputs = actionsPublicInputs("linux-arm64-node@24")
+	arm.Target = ".github/workflows/public-cache.yml#arm-runtime"
 	first, err := coordinator.Request(ctx, arm)
 	if err != nil {
 		t.Fatalf("request first build: %v", err)
 	}
 	amd := validRequest()
-	amd.Target = "amd-test"
+	amd.Target = "@acme/widgets#amd-test"
 	second, err := coordinator.Request(ctx, amd)
 	if err != nil {
 		t.Fatalf("request second build: %v", err)
@@ -187,7 +269,7 @@ func TestSQLiteCoordinatorPreservesFIFOCompatibilityAcrossRestart(t *testing.T) 
 	if amdLease.Build.ID != second.Build.ID {
 		t.Fatalf("leased build = %q, want compatible build %q", amdLease.Build.ID, second.Build.ID)
 	}
-	armLease, err := reopened.LeaseNext(ctx, localFakeWorker("arm", []publicbuild.Integration{publicbuild.IntegrationBuildKit}, []publicbuild.Platform{publicbuild.PlatformLinuxARM64}))
+	armLease, err := reopened.LeaseNext(ctx, localFakeWorker("arm", []publicbuild.Integration{publicbuild.IntegrationActions}, []publicbuild.Platform{publicbuild.PlatformLinuxARM64}))
 	if err != nil {
 		t.Fatalf("lease compatible first build: %v", err)
 	}
@@ -203,7 +285,7 @@ func TestSQLiteCoordinatorKeepsFailedAndCancelledIdentitiesRetryableAcrossRestar
 	path := filepath.Join(t.TempDir(), "public-builds.db")
 	coordinator := openSQLiteCoordinator(t, path)
 	failedRequest := validRequest()
-	failedRequest.Target = "failed"
+	failedRequest.Target = "@acme/widgets#failed"
 	failed, err := coordinator.Request(ctx, failedRequest)
 	if err != nil {
 		t.Fatalf("request failed candidate: %v", err)
@@ -216,7 +298,7 @@ func TestSQLiteCoordinatorKeepsFailedAndCancelledIdentitiesRetryableAcrossRestar
 		t.Fatalf("fail candidate: %v", err)
 	}
 	cancelledRequest := validRequest()
-	cancelledRequest.Target = "cancelled"
+	cancelledRequest.Target = "@acme/widgets#cancelled"
 	cancelled, err := coordinator.Request(ctx, cancelledRequest)
 	if err != nil {
 		t.Fatalf("request cancelled candidate: %v", err)
@@ -383,7 +465,7 @@ func TestSQLiteCoordinatorCancelCompleteRaceIsFenced(t *testing.T) {
 
 	for attempt := range 30 {
 		request := validRequest()
-		request.Target = "sqlite-race-" + time.Unix(0, int64(attempt)).Format("150405.000000000")
+		request.Target = "@acme/widgets#sqlite-race-" + time.Unix(0, int64(attempt)).Format("150405.000000000")
 		requested, err := coordinator.Request(ctx, request)
 		if err != nil {
 			t.Fatalf("request attempt %d: %v", attempt, err)
@@ -438,7 +520,7 @@ func TestSQLiteCoordinatorCancelCompleteRaceIsFencedAcrossDatabaseConnections(t 
 
 	for attempt := range 20 {
 		request := validRequest()
-		request.Target = "cross-race-" + time.Unix(0, int64(attempt)).Format("150405.000000000")
+		request.Target = "@acme/widgets#cross-race-" + time.Unix(0, int64(attempt)).Format("150405.000000000")
 		requested, err := first.Request(ctx, request)
 		if err != nil {
 			t.Fatalf("request attempt %d: %v", attempt, err)
@@ -482,6 +564,77 @@ func TestSQLiteCoordinatorCancelCompleteRaceIsFencedAcrossDatabaseConnections(t 
 	}
 }
 
+func TestSQLiteCoordinatorRecoversExpiredLeaseWhileRunning(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 31, 10, 0, 0, 0, time.UTC)
+	clock := now
+	config := testCoordinatorConfig(func() time.Time { return clock })
+	coordinator, err := publicbuild.OpenSQLiteCoordinator(filepath.Join(t.TempDir(), "public-builds.db"), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coordinator.Close()
+	if _, err := coordinator.Request(ctx, validRequest()); err != nil {
+		t.Fatal(err)
+	}
+	worker := localFakeWorker("worker", allIntegrations(), allPlatforms())
+	stale, err := coordinator.LeaseNext(ctx, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = now.Add(3 * time.Minute)
+	fresh, err := coordinator.LeaseNext(ctx, worker)
+	if err != nil {
+		t.Fatalf("recover expired lease: %v", err)
+	}
+	if fresh.Build.ID != stale.Build.ID || fresh.Token == stale.Token {
+		t.Fatalf("fresh lease = %#v, stale lease = %#v", fresh, stale)
+	}
+	if err := coordinator.AppendLog(ctx, stale, "too late"); !errors.Is(err, publicbuild.ErrLeaseLost) {
+		t.Fatalf("stale lease append = %v, want ErrLeaseLost", err)
+	}
+	if _, err := coordinator.BeginLeasedPublication(ctx, stale); !errors.Is(err, publicbuild.ErrPublicationLost) {
+		t.Fatalf("stale leased publication = %v, want ErrPublicationLost", err)
+	}
+	if _, err := coordinator.Cancel(ctx, fresh.Build.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.BeginLeasedPublication(ctx, fresh); !errors.Is(err, publicbuild.ErrPublicationLost) {
+		t.Fatalf("cancelled leased publication = %v, want ErrPublicationLost", err)
+	}
+}
+
+func TestSQLitePublicationPermitFencesCancellationAndWorkerFailure(t *testing.T) {
+	ctx := context.Background()
+	coordinator := openSQLiteCoordinator(t, filepath.Join(t.TempDir(), "public-builds.db"))
+	defer coordinator.Close()
+	requested, err := coordinator.Request(ctx, validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := coordinator.LeaseNext(ctx, localFakeWorker("worker", allIntegrations(), allPlatforms()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit, err := coordinator.BeginLeasedPublication(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Cancel(ctx, requested.Build.ID); !errors.Is(err, publicbuild.ErrInvalidTransition) {
+		t.Fatalf("cancel after publication began = %v, want ErrInvalidTransition", err)
+	}
+	if _, err := coordinator.Fail(ctx, lease, "late worker failure"); !errors.Is(err, publicbuild.ErrLeaseLost) {
+		t.Fatalf("worker failure after publication began = %v, want ErrLeaseLost", err)
+	}
+	completed, err := coordinator.CommitPublication(ctx, permit, testPublication("trusted-output"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.State != publicbuild.StateSucceeded || completed.Publication == nil {
+		t.Fatalf("completed build = %#v", completed)
+	}
+}
+
 func openSQLiteCoordinator(t *testing.T, path string) *publicbuild.SQLiteCoordinator {
 	t.Helper()
 	coordinator, err := publicbuild.OpenSQLiteCoordinator(path, publicbuild.Config{
@@ -495,6 +648,8 @@ func openSQLiteCoordinator(t *testing.T, path string) *publicbuild.SQLiteCoordin
 		SanitizeLog: func(message string) string {
 			return strings.ReplaceAll(message, "secret-token", "[REDACTED]")
 		},
+		SourcePolicy: publicbuild.SourcePolicyFunc(func(context.Context, string, string) error { return nil }),
+		RecipePolicy: publicbuild.RecipePolicyFunc(func(context.Context, publicbuild.Integration, string, string) error { return nil }),
 	})
 	if err != nil {
 		t.Fatalf("open SQLite coordinator: %v", err)

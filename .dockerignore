@@ -1,0 +1,10 @@
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+internal/**/*_test.go
+internal/**/testdata/
+!Dockerfile

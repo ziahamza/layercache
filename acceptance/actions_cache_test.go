@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestGitHubActionsV1CacheSurvivesRuntimeRestart(t *testing.T) {
@@ -27,14 +28,8 @@ func TestGitHubActionsV1CacheSurvivesRuntimeRestart(t *testing.T) {
 		"--max-size", "10485760",
 		"--non-interactive", "--json",
 	)
-	var connection struct {
-		CacheURL string `json:"cacheUrl"`
-		Token    string `json:"token"`
-	}
-	if err := json.Unmarshal(runLayerCache(t, "integration", "actions", "--config", configPath, "--json"), &connection); err != nil {
-		t.Fatal(err)
-	}
 	server := startLayerCache(t, binary, configPath, address)
+	connection := captureActionsConnection(t, binary, configPath)
 
 	want := []byte("github-actions-tar-zstd-archive")
 	reserveBody := fmt.Sprintf(`{"key":"pnpm-linux-feature-abc","version":"paths-v1","cacheSize":%d}`, len(want))
@@ -120,19 +115,22 @@ func TestGitHubActionsV1TeamCacheWarmsFreshHost(t *testing.T) {
 
 	hostAAddress := availableAddress(t)
 	hostAConfig := filepath.Join(root, "host-a.json")
+	const hostAAdminToken = "host-a-actions-admin-secret"
 	runLayerCache(t,
 		"setup", "--config", hostAConfig,
 		"--data-dir", filepath.Join(root, "host-a-cache"),
 		"--listen", hostAAddress,
 		"--project", "github.com/acme/widget",
 		"--actions-repository", "acme/widget",
+		"--local-token", hostAAdminToken,
 		"--team-url", "http://"+teamAddress, "--team-token", "team-actions-secret",
 		"--max-size", "10485760", "--non-interactive", "--json",
 	)
-	hostAToken := actionsConnection(t, hostAConfig).Token
 	hostA := startLayerCache(t, binary, hostAConfig, hostAAddress)
+	hostAToken := captureActionsConnection(t, binary, hostAConfig).Token
 	want := []byte("actions-team-cache-archive")
 	putActionsArchive(t, "http://"+hostAAddress+"/", hostAToken, "pnpm-shared-team", "paths-v1", want)
+	waitForPendingActionsUploads(t, "http://"+hostAAddress, hostAAdminToken)
 	hostA.stop(t)
 
 	hostBAddress := availableAddress(t)
@@ -146,8 +144,8 @@ func TestGitHubActionsV1TeamCacheWarmsFreshHost(t *testing.T) {
 		"--team-url", "http://"+teamAddress, "--team-token", "team-actions-secret",
 		"--max-size", "10485760", "--non-interactive", "--json",
 	)
-	hostBToken := actionsConnection(t, hostBConfig).Token
 	hostB := startLayerCache(t, binary, hostBConfig, hostBAddress)
+	hostBToken := captureActionsConnection(t, binary, hostBConfig).Token
 	defer hostB.stop(t)
 
 	got, source := getActionsArchive(t, "http://"+hostBAddress+"/", hostBToken, "pnpm-shared-team", "paths-v1")
@@ -161,18 +159,27 @@ func TestGitHubActionsV1TeamCacheWarmsFreshHost(t *testing.T) {
 	}
 }
 
+func waitForPendingActionsUploads(t *testing.T, baseURL, token string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		response := actionsRequest(t, http.MethodGet, baseURL+"/v1/status", token, nil, "")
+		var status struct {
+			PendingUploads int64 `json:"pendingUploads"`
+		}
+		decodeErr := json.NewDecoder(response.Body).Decode(&status)
+		response.Body.Close()
+		if response.StatusCode == http.StatusOK && decodeErr == nil && status.PendingUploads == 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for the Actions Team Cache upload to complete")
+}
+
 type actionsConnectionResult struct {
 	CacheURL string `json:"cacheUrl"`
 	Token    string `json:"token"`
-}
-
-func actionsConnection(t *testing.T, configPath string) actionsConnectionResult {
-	t.Helper()
-	var result actionsConnectionResult
-	if err := json.Unmarshal(runLayerCache(t, "integration", "actions", "--config", configPath, "--json"), &result); err != nil {
-		t.Fatal(err)
-	}
-	return result
 }
 
 func putActionsArchive(t *testing.T, cacheURL, token, key, version string, body []byte) {

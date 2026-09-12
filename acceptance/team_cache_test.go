@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -40,11 +41,8 @@ func TestTurboTeamCacheWarmsFreshHost(t *testing.T) {
 		"--max-size", "10485760",
 		"--non-interactive", "--json",
 	)
-	var hostA turboConnection
-	if err := json.Unmarshal(runLayerCache(t, "integration", "turbo", "--config", hostAConfig, "--json"), &hostA); err != nil {
-		t.Fatal(err)
-	}
 	hostAServer := startLayerCache(t, binary, hostAConfig, hostAAddress)
+	hostA := captureTurboConnection(t, binary, hostAConfig)
 
 	want := []byte("artifact-built-on-host-a")
 	artifactPath := "/v8/artifacts/team-shared-hash"
@@ -76,11 +74,8 @@ func TestTurboTeamCacheWarmsFreshHost(t *testing.T) {
 		"--max-size", "10485760",
 		"--non-interactive", "--json",
 	)
-	var hostB turboConnection
-	if err := json.Unmarshal(runLayerCache(t, "integration", "turbo", "--config", hostBConfig, "--json"), &hostB); err != nil {
-		t.Fatal(err)
-	}
 	hostBServer := startLayerCache(t, binary, hostBConfig, hostBAddress)
+	hostB := captureTurboConnection(t, binary, hostBConfig)
 	defer hostBServer.stop(t)
 
 	got, source := fetchTurboArtifact(t, hostB.APIURL+artifactPath, hostB.Token)
@@ -115,11 +110,8 @@ func TestFailedTurboTeamPublicationRetriesAfterRuntimeRestart(t *testing.T) {
 		"--team-url", "http://"+teamAddress, "--team-token", "retry-team-secret",
 		"--max-size", "10485760", "--non-interactive", "--json",
 	)
-	hostConnection := turboConnection{}
-	if err := json.Unmarshal(runLayerCache(t, "integration", "turbo", "--config", hostConfig, "--json"), &hostConnection); err != nil {
-		t.Fatal(err)
-	}
 	host := startLayerCache(t, binary, hostConfig, hostAddress)
+	hostConnection := captureTurboConnection(t, binary, hostConfig)
 	want := []byte("durably-queued-team-artifact")
 	request, err := http.NewRequest(http.MethodPut, hostConnection.APIURL+"/v8/artifacts/retry-after-restart", bytes.NewReader(want))
 	if err != nil {
@@ -139,7 +131,17 @@ func TestFailedTurboTeamPublicationRetriesAfterRuntimeRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gcRequest.Header.Set("Authorization", "Bearer "+hostConnection.Token)
+	var hostCredentials struct {
+		LocalToken string `json:"localToken"`
+	}
+	hostConfiguration, err := os.ReadFile(hostConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(hostConfiguration, &hostCredentials); err != nil {
+		t.Fatal(err)
+	}
+	gcRequest.Header.Set("Authorization", "Bearer "+hostCredentials.LocalToken)
 	gcResponse, err := http.DefaultClient.Do(gcRequest)
 	if err != nil {
 		t.Fatal(err)

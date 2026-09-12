@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,5 +78,62 @@ func TestReportCLIRequiresExactlyOneRunOrPeriodSelector(t *testing.T) {
 		if err := runReport(context.Background(), args, &stdout, &stderr); err == nil {
 			t.Fatalf("runReport(%v) succeeded", args)
 		}
+	}
+}
+
+func TestHumanReportExplainsSourcesBytesEstimatesAndOverhead(t *testing.T) {
+	t.Parallel()
+
+	grossMilliseconds := int64(250)
+	netMilliseconds := int64(-50)
+	report := measurement.RunReport{
+		RunID: "run-explained", Eligible: 3, Hits: 2, Misses: 1, HitRate: 2.0 / 3.0,
+		Bytes: measurement.Bytes{Downloaded: 1536, Uploaded: 512},
+		Sources: []measurement.SourceReport{
+			{Source: measurement.SourceLocalCache, Hits: 1, Downloaded: 1024},
+			{Source: measurement.SourcePublicCache, Hits: 1, Downloaded: 512},
+		},
+		GrossAvoidedTaskTime: measurement.Estimate{
+			Milliseconds: &grossMilliseconds, Method: "producerDuration", Confidence: measurement.ConfidenceHigh,
+			Known: 2, Total: 3,
+		},
+		Timing: measurement.TimingReport{LookupMS: 10, DownloadMS: 20, VerificationMS: 5, RestoreMS: 15, UploadMS: 50},
+		NetEstimatedBuildTimeSaved: measurement.Estimate{
+			Milliseconds: &netMilliseconds, Method: "criticalPath", Confidence: measurement.ConfidenceMedium,
+			Known: 3, Total: 3,
+		},
+		Degraded: true,
+	}
+	var output bytes.Buffer
+	if err := printRunReport(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Layer Cache run run-explained",
+		"Cache outcomes: 2/3 hits (67%); misses: 1",
+		"Bytes: 1.5 KiB downloaded; 512 B uploaded",
+		"Local Cache: hits: 1; 1.0 KiB downloaded; 0 B uploaded",
+		"Public Cache: hits: 1; 512 B downloaded; 0 B uploaded",
+		"Gross avoided task time: +250ms (producerDuration; high confidence; 2/3 known)",
+		"Measured cache overhead: +100ms (lookup 10ms; download 20ms; verification 5ms; restore 15ms; upload 50ms)",
+		"Net estimated build time saved: -50ms (criticalPath; medium confidence; 3/3 known)",
+		"Degraded: yes",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("human report omitted %q:\n%s", want, output.String())
+		}
+	}
+
+	output.Reset()
+	period := measurement.PeriodReport{
+		From: time.Date(2026, time.August, 30, 0, 0, 0, 0, time.UTC),
+		To:   time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC),
+		Runs: 4,
+	}
+	if err := printPeriodReport(&output, period); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Layer Cache period 2026-08-30T00:00:00Z to 2026-08-31T00:00:00Z (4 runs)") {
+		t.Fatalf("period report omitted range and run count:\n%s", output.String())
 	}
 }

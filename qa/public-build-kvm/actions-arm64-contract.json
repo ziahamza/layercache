@@ -1,0 +1,27 @@
+{
+  "protocol": "layercache.public-build/v1",
+  "platform": "linux/arm64",
+  "agent": "/opt/layercache/bin/layercache-guest-agent",
+  "builder": "layercache-actions-builder-v1",
+  "toolchain": "actions/cache@6.2.0",
+  "controlPort": "org.layercache.public-build.1",
+  "maxProcesses": 64,
+  "features": [
+    "read-only-source",
+    "ephemeral-work-disk",
+    "process-limit",
+    "streamed-output",
+    "no-network"
+  ],
+  "recipes": [
+    {
+      "integration": "actions",
+      "target": ".github/workflows/public-cache.yml#public-cache",
+      "digest": "sha256:b1932b5801c537689b2f10c99938139c960ce9bfd998eaed4c518556c77418de",
+      "mediaType": "application/vnd.layercache.actions-cache",
+      "resultFormat": "native-blob",
+      "executor": "actions-job-v2",
+      "maxBytes": 8388608
+    }
+  ]
+}

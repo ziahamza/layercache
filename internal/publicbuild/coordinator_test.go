@@ -62,7 +62,9 @@ func TestNewCoordinatorRequiresAdmissionLimitsAllowlistAndLogSanitizer(t *testin
 			DiskBytes:   40 << 30,
 			Timeout:     30 * time.Minute,
 		},
-		SanitizeLog: func(message string) string { return message },
+		SanitizeLog:  func(message string) string { return message },
+		SourcePolicy: publicbuild.SourcePolicyFunc(func(context.Context, string, string) error { return nil }),
+		RecipePolicy: publicbuild.RecipePolicyFunc(func(context.Context, publicbuild.Integration, string, string) error { return nil }),
 	}
 	tests := []struct {
 		name   string
@@ -256,17 +258,67 @@ func TestRequestCanonicalizesCompleteIdentity(t *testing.T) {
 	first.Repository = "https://github.com/ACME/WIDGETS.git/"
 	first.Commit = strings.ToUpper(first.Commit)
 	first.RecipeDigest = "sha256:" + strings.ToUpper(strings.TrimPrefix(first.RecipeDigest, "sha256:"))
+	first.Inputs = []publicbuild.DeclaredInput{{Name: "runtime", Value: "node@24"}, {Name: "feature", Value: "enabled"}, {Name: "compatibility", Value: "linux-amd64-node@24"}}
 	firstResult, err := coordinator.Request(context.Background(), first)
 	if err != nil {
 		t.Fatalf("request canonical identity: %v", err)
 	}
 
-	secondResult, err := coordinator.Request(context.Background(), validRequest())
+	second := validRequest()
+	second.Inputs = []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-amd64-node@24"}, {Name: "feature", Value: "enabled"}, {Name: "runtime", Value: "node@24"}}
+	secondResult, err := coordinator.Request(context.Background(), second)
 	if err != nil {
 		t.Fatalf("request equivalent identity: %v", err)
 	}
 	if !secondResult.Reused || secondResult.Build.ID != firstResult.Build.ID {
 		t.Fatalf("equivalent identity = %#v, want reused build %q", secondResult, firstResult.Build.ID)
+	}
+	if got := firstResult.Build.Request.Inputs; !reflect.DeepEqual(got, second.Inputs) {
+		t.Fatalf("canonical inputs = %#v, want %#v", got, second.Inputs)
+	}
+	changed := second
+	changed.Inputs[2].Value = "node@22"
+	changedResult, err := coordinator.Request(context.Background(), changed)
+	if err != nil {
+		t.Fatalf("request changed declared input: %v", err)
+	}
+	if changedResult.Reused || changedResult.Build.ID == firstResult.Build.ID {
+		t.Fatalf("changed declared input reused %#v", changedResult)
+	}
+}
+
+func TestRequestRejectsInvalidDeclaredInputs(t *testing.T) {
+	t.Parallel()
+	tooMany := []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-amd64-node@24"}}
+	for index := 0; index < 32; index++ {
+		tooMany = append(tooMany, publicbuild.DeclaredInput{Name: fmt.Sprintf("input%02d", index), Value: "value"})
+	}
+	tooLarge := []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-amd64-node@24"}}
+	for index := 0; index < 16; index++ {
+		tooLarge = append(tooLarge, publicbuild.DeclaredInput{Name: fmt.Sprintf("input%02d", index), Value: strings.Repeat("x", 1024)})
+	}
+	tests := []struct {
+		name   string
+		inputs []publicbuild.DeclaredInput
+	}{
+		{"duplicate", []publicbuild.DeclaredInput{{Name: "runtime", Value: "one"}, {Name: "runtime", Value: "two"}}},
+		{"unsafe name", []publicbuild.DeclaredInput{{Name: "Runtime", Value: "node@24"}}},
+		{"control value", []publicbuild.DeclaredInput{{Name: "runtime", Value: "node@24\nsecret"}}},
+		{"invalid UTF-8 value", []publicbuild.DeclaredInput{{Name: "runtime", Value: string([]byte{0xff})}}},
+		{"too many", tooMany},
+		{"value too large", []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-amd64-node@24"}, {Name: "runtime", Value: strings.Repeat("x", 1025)}}},
+		{"total too large", tooLarge},
+		{"invalid compatibility", []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-amd64-bad value"}}},
+		{"wrong-platform compatibility", []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-arm64-node@24"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := validRequest()
+			request.Inputs = test.inputs
+			if _, err := newCoordinator(t).Request(context.Background(), request); !errors.Is(err, publicbuild.ErrRejected) {
+				t.Fatalf("request error = %v, want ErrRejected", err)
+			}
+		})
 	}
 }
 
@@ -280,7 +332,7 @@ func TestRequestAcceptsEverySupportedIntegrationPlatformAndCommitIdentity(t *tes
 		commit      string
 	}{
 		{"turbo linux amd64 SHA-1", publicbuild.IntegrationTurbo, publicbuild.PlatformLinuxAMD64, strings.Repeat("a", 40)},
-		{"BuildKit linux arm64 SHA-256", publicbuild.IntegrationBuildKit, publicbuild.PlatformLinuxARM64, strings.Repeat("b", 64)},
+		{"Turbo linux arm64 SHA-256", publicbuild.IntegrationTurbo, publicbuild.PlatformLinuxARM64, strings.Repeat("b", 64)},
 		{"Actions linux amd64 SHA-1", publicbuild.IntegrationActions, publicbuild.PlatformLinuxAMD64, strings.Repeat("c", 40)},
 	}
 	coordinator := newCoordinator(t)
@@ -289,8 +341,14 @@ func TestRequestAcceptsEverySupportedIntegrationPlatformAndCommitIdentity(t *tes
 			request := validRequest()
 			request.Integration = test.integration
 			request.Platform = test.platform
+			compatibility := strings.ReplaceAll(string(test.platform), "/", "-") + "-node@24"
+			request.Inputs = []publicbuild.DeclaredInput{{Name: "compatibility", Value: compatibility}}
 			request.Commit = test.commit
-			request.Target = fmt.Sprintf("target-%d", index)
+			request.Target = fmt.Sprintf("@acme/widgets#target-%d", index)
+			if test.integration == publicbuild.IntegrationActions {
+				request.Target = fmt.Sprintf(".github/workflows/public-cache.yml#target-%d", index)
+				request.Inputs = actionsPublicInputs(compatibility)
+			}
 			result, err := coordinator.Request(context.Background(), request)
 			if err != nil {
 				t.Fatalf("request supported Public Build: %v", err)
@@ -299,6 +357,76 @@ func TestRequestAcceptsEverySupportedIntegrationPlatformAndCommitIdentity(t *tes
 				t.Fatalf("state = %q, want queued", result.Build.State)
 			}
 		})
+	}
+}
+
+func TestRequestAcceptsBuildKitForCompleteOCICollectors(t *testing.T) {
+	t.Parallel()
+	request := validRequest()
+	request.Integration = publicbuild.IntegrationBuildKit
+	result, err := newCoordinator(t).Request(context.Background(), request)
+	if err != nil {
+		t.Fatalf("request BuildKit Public Build: %v", err)
+	}
+	if result.Build.State != publicbuild.StateQueued {
+		t.Fatalf("state = %q, want queued", result.Build.State)
+	}
+}
+
+func TestPublicCompatibilityIdentityUsesWorkloadPlatformNotServerHost(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		request publicbuild.BuildRequest
+		want    string
+	}{
+		{request: publicbuild.BuildRequest{Integration: publicbuild.IntegrationBuildKit, Platform: publicbuild.PlatformLinuxAMD64}, want: "linux-amd64"},
+		{request: publicbuild.BuildRequest{Integration: publicbuild.IntegrationBuildKit, Platform: publicbuild.PlatformLinuxARM64}, want: "linux-arm64"},
+		{request: publicbuild.BuildRequest{
+			Integration: publicbuild.IntegrationTurbo, Platform: publicbuild.PlatformLinuxARM64,
+			Inputs: []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-arm64-node@24-schema1"}},
+		}, want: "linux-arm64-node@24-schema1"},
+	} {
+		got, err := publicbuild.CompatibilityIdentity(test.request)
+		if err != nil {
+			t.Fatalf("derive compatibility for %#v: %v", test.request, err)
+		}
+		if got != test.want {
+			t.Fatalf("compatibility = %q, want %q", got, test.want)
+		}
+	}
+}
+
+func TestPublicationProjectIdentityUsesNativeActionsNamespace(t *testing.T) {
+	t.Parallel()
+
+	got, err := publicbuild.PublicationProjectIdentity(
+		publicbuild.IntegrationActions,
+		"github.com/acme/widget",
+		"acme/widget",
+		"https://github.com/acme/widget",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "acme/widget" {
+		t.Fatalf("Actions publication project = %q", got)
+	}
+	if _, err := publicbuild.PublicationProjectIdentity(
+		publicbuild.IntegrationActions,
+		"github.com/acme/widget",
+		"acme/other",
+		"https://github.com/acme/widget",
+	); err == nil {
+		t.Fatal("mismatched Actions repository was accepted")
+	}
+	got, err = publicbuild.PublicationProjectIdentity(
+		publicbuild.IntegrationTurbo,
+		"github.com/acme/widget",
+		"acme/widget",
+		"https://github.com/acme/widget",
+	)
+	if err != nil || got != "github.com/acme/widget" {
+		t.Fatalf("Turbo publication project = %q, error = %v", got, err)
 	}
 }
 
@@ -395,16 +523,17 @@ func TestLeaseNextPreservesQueueOrderAmongWorkerCompatibleBuilds(t *testing.T) {
 
 	ctx := context.Background()
 	coordinator := newCoordinator(t)
-	buildKitRequest := validRequest()
-	buildKitRequest.Integration = publicbuild.IntegrationBuildKit
-	buildKitRequest.Target = "runtime"
-	buildKitRequest.Platform = publicbuild.PlatformLinuxARM64
-	first, err := coordinator.Request(ctx, buildKitRequest)
+	actionsRequest := validRequest()
+	actionsRequest.Integration = publicbuild.IntegrationActions
+	actionsRequest.Target = ".github/workflows/public-cache.yml#runtime"
+	actionsRequest.Platform = publicbuild.PlatformLinuxARM64
+	actionsRequest.Inputs = actionsPublicInputs("linux-arm64-node@24")
+	first, err := coordinator.Request(ctx, actionsRequest)
 	if err != nil {
-		t.Fatalf("request BuildKit Public Build: %v", err)
+		t.Fatalf("request Actions Public Build: %v", err)
 	}
 	turboRequest := validRequest()
-	turboRequest.Target = "test"
+	turboRequest.Target = "@acme/widgets#test"
 	second, err := coordinator.Request(ctx, turboRequest)
 	if err != nil {
 		t.Fatalf("request Turbo Public Build: %v", err)
@@ -423,14 +552,14 @@ func TestLeaseNextPreservesQueueOrderAmongWorkerCompatibleBuilds(t *testing.T) {
 		t.Fatalf("leased id = %q, want compatible queued id %q", secondLease.Build.ID, second.Build.ID)
 	}
 
-	arm64BuildKit := localFakeWorker("buildkit-arm64", []publicbuild.Integration{
-		publicbuild.IntegrationBuildKit,
+	arm64Actions := localFakeWorker("actions-arm64", []publicbuild.Integration{
+		publicbuild.IntegrationActions,
 	}, []publicbuild.Platform{
 		publicbuild.PlatformLinuxARM64,
 	})
-	firstLease, err := coordinator.LeaseNext(ctx, arm64BuildKit)
+	firstLease, err := coordinator.LeaseNext(ctx, arm64Actions)
 	if err != nil {
-		t.Fatalf("lease earlier compatible BuildKit build: %v", err)
+		t.Fatalf("lease earlier compatible Actions build: %v", err)
 	}
 	if firstLease.Build.ID != first.Build.ID {
 		t.Fatalf("leased id = %q, want first queued id %q", firstLease.Build.ID, first.Build.ID)
@@ -438,6 +567,36 @@ func TestLeaseNextPreservesQueueOrderAmongWorkerCompatibleBuilds(t *testing.T) {
 
 	if _, err := coordinator.LeaseNext(ctx, amd64Turbo); !errors.Is(err, publicbuild.ErrNoWork) {
 		t.Fatalf("empty compatible queue error = %v, want ErrNoWork", err)
+	}
+}
+
+func TestLeaseNextUsesExactRecipeCapabilities(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	coordinator := newCoordinator(t)
+	unsupported := validRequest()
+	unsupported.Target = "@acme/widgets#unsupported"
+	unsupported.RecipeDigest = "sha256:" + strings.Repeat("c", 64)
+	if _, err := coordinator.Request(ctx, unsupported); err != nil {
+		t.Fatal(err)
+	}
+	supported := validRequest()
+	supported.Target = "@acme/widgets#supported"
+	queued, err := coordinator.Request(ctx, supported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := localFakeWorker("recipe-worker", allIntegrations(), []publicbuild.Platform{publicbuild.PlatformLinuxAMD64})
+	worker.Supported.Recipes = []publicbuild.WorkerRecipeCapability{{
+		Integration: supported.Integration, Target: supported.Target, RecipeDigest: supported.RecipeDigest,
+	}}
+	lease, err := coordinator.LeaseNext(ctx, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Build.ID != queued.Build.ID {
+		t.Fatalf("leased %q, want exact recipe-compatible build %q", lease.Build.ID, queued.Build.ID)
 	}
 }
 
@@ -633,7 +792,7 @@ func TestCancelAndCompleteRaceNeverPublishesAfterAcceptedCancellation(t *testing
 	const attempts = 50
 	for attempt := range attempts {
 		request := validRequest()
-		request.Target = fmt.Sprintf("race-%d", attempt)
+		request.Target = fmt.Sprintf("@acme/widgets#race-%d", attempt)
 		requested, err := coordinator.Request(ctx, request)
 		if err != nil {
 			t.Fatalf("request attempt %d: %v", attempt, err)
@@ -682,6 +841,232 @@ func TestCancelAndCompleteRaceNeverPublishesAfterAcceptedCancellation(t *testing
 		default:
 			t.Fatalf("attempt %d had neither accepted cancellation nor completion: cancel=%v complete=%v", attempt, cancelErr, completeErr)
 		}
+	}
+}
+
+func TestExpiredLeaseIsRecoveredWithoutCoordinatorRestart(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 31, 10, 0, 0, 0, time.UTC)
+	clock := now
+	coordinator, err := publicbuild.NewCoordinator(testCoordinatorConfig(func() time.Time { return clock }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Request(ctx, validRequest()); err != nil {
+		t.Fatal(err)
+	}
+	worker := localFakeWorker("worker", allIntegrations(), allPlatforms())
+	stale, err := coordinator.LeaseNext(ctx, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = now.Add(3 * time.Minute)
+	if _, err := coordinator.Renew(ctx, stale); !errors.Is(err, publicbuild.ErrLeaseLost) {
+		t.Fatalf("expired renewal error = %v, want ErrLeaseLost", err)
+	}
+	fresh, err := coordinator.LeaseNext(ctx, worker)
+	if err != nil {
+		t.Fatalf("lease recovered build: %v", err)
+	}
+	if fresh.Build.ID != stale.Build.ID || fresh.Token == stale.Token || !fresh.ExpiresAt.After(clock) {
+		t.Fatalf("fresh lease = %#v, stale lease = %#v", fresh, stale)
+	}
+}
+
+func TestLeasedPublicationRejectsExpiredReplacementAndCancellation(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 31, 10, 0, 0, 0, time.UTC)
+	clock := now
+	coordinator, err := publicbuild.NewCoordinator(testCoordinatorConfig(func() time.Time { return clock }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := coordinator.Request(ctx, validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := localFakeWorker("worker", allIntegrations(), allPlatforms())
+	stale, err := coordinator.LeaseNext(ctx, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = now.Add(3 * time.Minute)
+	fresh, err := coordinator.LeaseNext(ctx, worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.BeginLeasedPublication(ctx, stale); !errors.Is(err, publicbuild.ErrPublicationLost) {
+		t.Fatalf("stale leased publication = %v, want ErrPublicationLost", err)
+	}
+	if _, err := coordinator.Cancel(ctx, requested.Build.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.BeginLeasedPublication(ctx, fresh); !errors.Is(err, publicbuild.ErrPublicationLost) {
+		t.Fatalf("cancelled leased publication = %v, want ErrPublicationLost", err)
+	}
+}
+
+func TestPublicationPermitFencesAcceptedCancellation(t *testing.T) {
+	ctx := context.Background()
+	coordinator, err := publicbuild.NewCoordinator(testCoordinatorConfig(time.Now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := coordinator.Request(ctx, validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := coordinator.LeaseNext(ctx, localFakeWorker("worker", allIntegrations(), allPlatforms()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit, err := coordinator.BeginLeasedPublication(ctx, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Cancel(ctx, requested.Build.ID); !errors.Is(err, publicbuild.ErrInvalidTransition) {
+		t.Fatalf("cancel after collection began = %v, want ErrInvalidTransition", err)
+	}
+	completed, err := coordinator.CommitPublication(ctx, permit, testPublication("trusted-output"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.State != publicbuild.StateSucceeded {
+		t.Fatalf("state = %q, want succeeded", completed.State)
+	}
+
+	retry := validRequest()
+	retry.Target = "@acme/widgets#cancel-first"
+	queued, err := coordinator.Request(ctx, retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Cancel(ctx, queued.Build.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRequestReusesPublicationIndexBeforeQueueing(t *testing.T) {
+	config := testCoordinatorConfig(time.Now)
+	config.Publications = publicbuild.PublicationIndexFunc(func(_ context.Context, request publicbuild.BuildRequest) (publicbuild.ExistingPublication, error) {
+		return publicbuild.ExistingPublication{
+			Identity: "public-identity", BuildID: "public-build-existing",
+			Digest: "sha256:" + strings.Repeat("c", 64), SizeBytes: 42,
+			MediaType: "application/vnd.layercache.turbo", ProducerDuration: time.Second,
+		}, nil
+	})
+	coordinator, err := publicbuild.NewCoordinator(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Request(context.Background(), validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Reused || result.Build.ID != "public-build-existing" || result.Build.State != publicbuild.StateSucceeded {
+		t.Fatalf("existing publication result = %#v", result)
+	}
+	if _, err := coordinator.LeaseNext(context.Background(), localFakeWorker("worker", allIntegrations(), allPlatforms())); !errors.Is(err, publicbuild.ErrNoWork) {
+		t.Fatalf("publication reuse queued work: %v", err)
+	}
+}
+
+func TestRequestRepairsSucceededBuildWhenPublicationBecomesUnavailable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	lookupErr := error(publicbuild.ErrPublicationNotFound)
+	config := testCoordinatorConfig(func() time.Time { return now })
+	config.Publications = publicbuild.PublicationIndexFunc(func(context.Context, publicbuild.BuildRequest) (publicbuild.ExistingPublication, error) {
+		return publicbuild.ExistingPublication{}, lookupErr
+	})
+	coordinator, err := publicbuild.NewCoordinator(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	request := validRequest()
+	first, err := coordinator.Request(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := coordinator.LeaseNext(ctx, localFakeWorker("worker", allIntegrations(), allPlatforms()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := coordinator.Complete(ctx, lease, testPublication("trusted-output"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := coordinator.Request(ctx, request); !errors.Is(err, publicbuild.ErrPublicationPending) {
+		t.Fatalf("recent completed build request = %v, want ErrPublicationPending", err)
+	}
+
+	lookupErr = publicbuild.ErrPublicationUnavailable
+	repair, err := coordinator.Request(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair.Reused || repair.Build.State != publicbuild.StateQueued || repair.Build.ID == first.Build.ID {
+		t.Fatalf("unavailable publication repair = %#v", repair)
+	}
+	retired, err := coordinator.Inspect(ctx, completed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.State != publicbuild.StateFailed || retired.Publication != nil || retired.Failure == "" {
+		t.Fatalf("retired completed build = %#v", retired)
+	}
+}
+
+func TestRequestRepairsUnregisteredSucceededBuildAfterRecoveryWindow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	config := testCoordinatorConfig(func() time.Time { return now })
+	config.Publications = publicbuild.PublicationIndexFunc(func(context.Context, publicbuild.BuildRequest) (publicbuild.ExistingPublication, error) {
+		return publicbuild.ExistingPublication{}, publicbuild.ErrPublicationNotFound
+	})
+	coordinator, err := publicbuild.NewCoordinator(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	request := validRequest()
+	first, err := coordinator.Request(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := coordinator.LeaseNext(ctx, localFakeWorker("worker", allIntegrations(), allPlatforms()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Complete(ctx, lease, testPublication("trusted-output")); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(6 * time.Minute)
+	repair, err := coordinator.Request(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair.Reused || repair.Build.State != publicbuild.StateQueued || repair.Build.ID == first.Build.ID {
+		t.Fatalf("unregistered publication repair = %#v", repair)
+	}
+}
+
+func testCoordinatorConfig(now func() time.Time) publicbuild.Config {
+	return publicbuild.Config{
+		AllowlistedRepositories: []string{"https://github.com/acme/widgets"},
+		Limits: publicbuild.Resources{
+			CPUMillis: 4_000, MemoryBytes: 8 << 30, DiskBytes: 40 << 30, Timeout: 30 * time.Minute,
+		},
+		SanitizeLog:   func(message string) string { return message },
+		SourcePolicy:  publicbuild.SourcePolicyFunc(func(context.Context, string, string) error { return nil }),
+		RecipePolicy:  publicbuild.RecipePolicyFunc(func(context.Context, publicbuild.Integration, string, string) error { return nil }),
+		LeaseDuration: 2 * time.Minute,
+		Now:           now,
 	}
 }
 
@@ -759,6 +1144,8 @@ func newCoordinator(t *testing.T) publicbuild.Coordinator {
 		SanitizeLog: func(message string) string {
 			return strings.ReplaceAll(message, "secret-token", "[REDACTED]")
 		},
+		SourcePolicy: publicbuild.SourcePolicyFunc(func(context.Context, string, string) error { return nil }),
+		RecipePolicy: publicbuild.RecipePolicyFunc(func(context.Context, publicbuild.Integration, string, string) error { return nil }),
 	})
 	if err != nil {
 		t.Fatalf("new coordinator: %v", err)
@@ -771,14 +1158,24 @@ func validRequest() publicbuild.BuildRequest {
 		Repository:   "https://github.com/acme/widgets",
 		Commit:       strings.Repeat("a", 40),
 		Integration:  publicbuild.IntegrationTurbo,
-		Target:       "build",
+		Target:       "@acme/widgets#build",
 		RecipeDigest: "sha256:" + strings.Repeat("b", 64),
 		Platform:     publicbuild.PlatformLinuxAMD64,
+		Inputs:       []publicbuild.DeclaredInput{{Name: "compatibility", Value: "linux-amd64-node@24"}},
 		Resources: publicbuild.Resources{
 			CPUMillis:   2_000,
 			MemoryBytes: 4 << 30,
 			DiskBytes:   20 << 30,
 			Timeout:     10 * time.Minute,
 		},
+	}
+}
+
+func actionsPublicInputs(compatibility string) []publicbuild.DeclaredInput {
+	return []publicbuild.DeclaredInput{
+		{Name: "actions.key", Value: "fixture-key"},
+		{Name: "actions.ref", Value: "refs/heads/main"},
+		{Name: "actions.version", Value: strings.Repeat("1", 64)},
+		{Name: "compatibility", Value: compatibility},
 	}
 }

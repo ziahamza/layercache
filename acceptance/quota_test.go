@@ -2,7 +2,6 @@ package acceptance_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -20,12 +19,9 @@ func TestLocalCacheEvictsLeastRecentlyUsedEntry(t *testing.T) {
 		"--max-size", "10",
 		"--non-interactive", "--json",
 	)
-	var connection turboConnection
-	if err := json.Unmarshal(runLayerCache(t, "integration", "turbo", "--config", configPath, "--json"), &connection); err != nil {
-		t.Fatal(err)
-	}
 	server := startLayerCache(t, binary, configPath, address)
 	defer server.stop(t)
+	connection := captureTurboConnection(t, binary, configPath)
 
 	putTurboArtifact(t, connection, "artifact-a", []byte("aaaa"))
 	putTurboArtifact(t, connection, "artifact-b", []byte("bbbb"))

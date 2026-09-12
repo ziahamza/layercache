@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/layercache/layercache/internal/retention"
 	_ "modernc.org/sqlite"
 )
 
@@ -23,6 +25,7 @@ var (
 	ErrConflict     = errors.New("cache entry already contains different bytes")
 	ErrCorrupt      = errors.New("artifact digest verification failed")
 	ErrQuota        = errors.New("Local Cache quota exceeded")
+	ErrPinned       = errors.New("Local Cache entry is pinned")
 	ErrMinFreeSpace = minimumFreeSpaceError{}
 )
 
@@ -57,23 +60,26 @@ type Entry struct {
 }
 
 type Stats struct {
-	UsageBytes int64 `json:"usageBytes"`
-	Artifacts  int64 `json:"artifacts"`
-	Entries    int64 `json:"entries"`
+	UsageBytes    int64 `json:"usageBytes"`
+	MetadataBytes int64 `json:"metadataBytes"`
+	Artifacts     int64 `json:"artifacts"`
+	Entries       int64 `json:"entries"`
 }
 
 type Store struct {
-	db           *sql.DB
-	root         string
-	maxBytes     int64
-	minFreeBytes int64
-	writeMu      sync.Mutex
-	spaceMu      sync.Mutex
-	stagingMu    sync.Mutex
-	stagingBytes int64
-	uploadBytes  int64
-	probeSpace   func(string) (filesystemSpace, error)
-	commitTx     func(*sql.Tx) error
+	db               *sql.DB
+	root             string
+	maxBytes         int64
+	maxMetadataBytes int64
+	minFreeBytes     int64
+	evictionPolicy   retention.Policy
+	writeMu          sync.RWMutex
+	spaceMu          sync.Mutex
+	stagingMu        sync.Mutex
+	stagingBytes     int64
+	uploadBytes      int64
+	probeSpace       func(string) (filesystemSpace, error)
+	commitTx         func(*sql.Tx) error
 }
 
 // Open initializes a Local Cache. minFreeBytes may raise, but never lower,
@@ -90,7 +96,12 @@ func Open(ctx context.Context, root string, maxBytes, minFreeBytes int64) (*Stor
 			return nil, fmt.Errorf("create artifact directory %s: %w", dir, err)
 		}
 	}
-	db, err := sql.Open("sqlite", filepath.Join(root, "metadata.db"))
+	metadataURL := &url.URL{Scheme: "file", Path: filepath.Join(root, "metadata.db")}
+	query := metadataURL.Query()
+	query.Add("_pragma", "busy_timeout(5000)")
+	query.Add("_pragma", "foreign_keys(1)")
+	metadataURL.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite", metadataURL.String())
 	if err != nil {
 		return nil, fmt.Errorf("open Local Cache metadata: %w", err)
 	}
@@ -104,6 +115,10 @@ func Open(ctx context.Context, root string, maxBytes, minFreeBytes int64) (*Stor
 			size INTEGER NOT NULL,
 			created_at INTEGER NOT NULL,
 			last_accessed_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS artifact_access (
+			digest TEXT PRIMARY KEY REFERENCES artifacts(digest) ON DELETE CASCADE,
+			read_count INTEGER NOT NULL CHECK (read_count BETWEEN 0 AND 32)
 		)`,
 		`CREATE TABLE IF NOT EXISTS cache_entries (
 			integration TEXT NOT NULL,
@@ -146,7 +161,7 @@ func Open(ctx context.Context, root string, maxBytes, minFreeBytes int64) (*Stor
 		}
 	}
 	store := &Store{
-		db: db, root: root, maxBytes: maxBytes, minFreeBytes: minFreeBytes,
+		db: db, root: root, maxBytes: maxBytes, maxMetadataBytes: metadataBudget(maxBytes), minFreeBytes: minFreeBytes,
 		probeSpace: defaultProbeSpace,
 		commitTx:   func(tx *sql.Tx) error { return tx.Commit() },
 	}
@@ -219,6 +234,9 @@ func (store *Store) put(ctx context.Context, key Key, metadata Metadata, body io
 	if err != nil {
 		return Entry{}, false, fmt.Errorf("encode artifact metadata: %w", err)
 	}
+	if len(metadataJSON) > 64<<10 {
+		return Entry{}, false, errors.New("artifact metadata exceeds 64 KiB")
+	}
 	now := time.Now().UTC()
 	entry := Entry{Key: key, Digest: digest, Size: size, Metadata: metadata, CreatedAt: now}
 
@@ -245,6 +263,10 @@ func (store *Store) put(ctx context.Context, key Key, metadata Metadata, body io
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Entry{}, false, fmt.Errorf("check existing entry: %w", err)
+	}
+	entryMetadataBytes := estimatedEntryMetadataBytes(key, metadataJSON)
+	if err := store.evictMetadataToFit(ctx, entryMetadataBytes); err != nil {
+		return Entry{}, false, err
 	}
 
 	var artifactExists int
@@ -276,6 +298,13 @@ func (store *Store) put(ctx context.Context, key Key, metadata Metadata, body io
 		}
 		newBlob, err = store.ensureCanonicalBlob(tmpPath, digest, size)
 		if err != nil {
+			return Entry{}, false, err
+		}
+	} else {
+		// A metadata row is not proof that the canonical file is still healthy.
+		// Verify it against this complete staged copy and repair missing or
+		// corrupted bytes before another logical entry starts referencing it.
+		if _, err := store.ensureCanonicalBlob(tmpPath, digest, size); err != nil {
 			return Entry{}, false, err
 		}
 	}
@@ -322,7 +351,12 @@ func (store *Store) put(ctx context.Context, key Key, metadata Metadata, body io
 	return entry, rows == 1, nil
 }
 
-func (store *Store) Get(ctx context.Context, key Key) (Entry, *os.File, error) {
+func (store *Store) Get(ctx context.Context, key Key) (Entry, io.ReadCloser, error) {
+	// Eviction must not remove the selected blob between the metadata lookup and
+	// opening it. Once the descriptor is open, supported hosts retain its inode
+	// for the active reader even if a later collection unlinks the path.
+	store.writeMu.RLock()
+	defer store.writeMu.RUnlock()
 	entry, err := store.entry(ctx, key, true)
 	if err != nil {
 		return Entry{}, nil, err
@@ -342,6 +376,10 @@ func (store *Store) Get(ctx context.Context, key Key) (Entry, *os.File, error) {
 		file.Close()
 		return Entry{}, nil, fmt.Errorf("rewind artifact: %w", err)
 	}
+	// HEAD probes and corrupt reads do not count as reusable work. Counter
+	// failure is best effort and must not turn a verified cache read into a miss.
+	_, _ = store.db.ExecContext(ctx, `INSERT INTO artifact_access(digest, read_count) VALUES(?, 1)
+		ON CONFLICT(digest) DO UPDATE SET read_count = MIN(read_count + 1, 32)`, entry.Digest)
 	return entry, file, nil
 }
 
@@ -365,7 +403,69 @@ func (store *Store) Stats(ctx context.Context) (Stats, error) {
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cache_entries`).Scan(&stats.Entries); err != nil {
 		return Stats{}, fmt.Errorf("read cache entry statistics: %w", err)
 	}
+	metadataBytes, err := store.metadataUsage(ctx)
+	if err != nil {
+		return Stats{}, err
+	}
+	stats.MetadataBytes = metadataBytes
 	return stats, nil
+}
+
+func (store *Store) evictMetadataToFit(ctx context.Context, incoming int64) error {
+	if incoming > store.maxMetadataBytes {
+		return ErrQuota
+	}
+	for {
+		usage, err := store.metadataUsage(ctx)
+		if err != nil {
+			return err
+		}
+		if usage+incoming <= store.maxMetadataBytes {
+			return nil
+		}
+		removed, err := store.evictOldest(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			return ErrQuota
+		}
+	}
+}
+
+func (store *Store) evictBlob(ctx context.Context) (bool, error) {
+	if store.evictionPolicy == retention.Impact {
+		return store.evictImpact(ctx)
+	}
+	return store.evictOldest(ctx, nil)
+}
+
+func (store *Store) metadataUsage(ctx context.Context) (int64, error) {
+	var usage int64
+	err := store.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(
+		length(integration) + length(project) + length(compatibility) + length(native_key) +
+		length(version) + length(ref_scope) + length(digest) + length(metadata_json) + 160
+	), 0) FROM cache_entries`).Scan(&usage)
+	if err != nil {
+		return 0, fmt.Errorf("read Local Cache metadata usage: %w", err)
+	}
+	return usage, nil
+}
+
+func metadataBudget(maxBytes int64) int64 {
+	budget := maxBytes / 100
+	if budget < 1<<20 {
+		budget = 1 << 20
+	}
+	if budget > 256<<20 {
+		budget = 256 << 20
+	}
+	return budget
+}
+
+func estimatedEntryMetadataBytes(key Key, metadataJSON []byte) int64 {
+	return int64(len(key.Integration) + len(key.Project) + len(key.Compatibility) + len(key.Native) +
+		len(key.Version) + len(key.Ref) + sha256.Size*2 + len(metadataJSON) + 160)
 }
 
 func (store *Store) Delete(ctx context.Context, key Key) error {
@@ -382,11 +482,25 @@ func (store *Store) Delete(ctx context.Context, key Key) error {
 	} else if err != nil {
 		return fmt.Errorf("read cache entry for deletion: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM cache_entries
-		WHERE integration = ? AND project = ? AND compatibility = ? AND native_key = ? AND version = ? AND ref_scope = ?`, keyArgs(key)...); err != nil {
+	result, err := tx.ExecContext(ctx, `DELETE FROM cache_entries AS entry
+		WHERE integration = ? AND project = ? AND compatibility = ? AND native_key = ? AND version = ? AND ref_scope = ?
+		AND NOT EXISTS (
+			SELECT 1 FROM cache_entry_pins AS pin
+			WHERE pin.integration = entry.integration AND pin.project = entry.project
+				AND pin.compatibility = entry.compatibility AND pin.native_key = entry.native_key
+				AND pin.version = entry.version AND pin.ref_scope = entry.ref_scope
+		)`, keyArgs(key)...)
+	if err != nil {
 		return fmt.Errorf("delete cache entry: %w", err)
 	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM artifacts WHERE digest = ?
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("confirm cache entry deletion: %w", err)
+	}
+	if deleted == 0 {
+		return ErrPinned
+	}
+	result, err = tx.ExecContext(ctx, `DELETE FROM artifacts WHERE digest = ?
 		AND NOT EXISTS (SELECT 1 FROM cache_entries WHERE digest = ?)`, digest, digest)
 	if err != nil {
 		return fmt.Errorf("release unreferenced artifact: %w", err)
@@ -421,7 +535,7 @@ func (store *Store) evictTo(ctx context.Context, targetBytes int64) error {
 		if usage <= targetBytes {
 			return nil
 		}
-		removed, err := store.evictOldest(ctx, nil)
+		removed, err := store.evictBlob(ctx)
 		if err != nil {
 			return err
 		}
@@ -500,6 +614,9 @@ func (store *Store) entry(ctx context.Context, key Key, touch bool) (Entry, erro
 	}
 	if err != nil {
 		return Entry{}, fmt.Errorf("read cache entry: %w", err)
+	}
+	if !isLowerHexName(entry.Digest, sha256.Size*2) || entry.Size < 0 {
+		return Entry{}, ErrCorrupt
 	}
 	if err := json.Unmarshal(metadataJSON, &entry.Metadata); err != nil {
 		return Entry{}, fmt.Errorf("decode cache metadata: %w", err)
@@ -588,15 +705,20 @@ func (store *Store) cleanStaging() error {
 
 func (store *Store) reconcileBlobs(ctx context.Context) error {
 	referenced := make(map[string]struct{})
-	rows, err := store.db.QueryContext(ctx, `SELECT digest FROM artifacts`)
+	rows, err := store.db.QueryContext(ctx, `SELECT digest, size FROM artifacts`)
 	if err != nil {
 		return fmt.Errorf("read referenced artifact digests: %w", err)
 	}
 	for rows.Next() {
 		var digest string
-		if err := rows.Scan(&digest); err != nil {
+		var size int64
+		if err := rows.Scan(&digest, &size); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan referenced artifact digest: %w", err)
+		}
+		if !isLowerHexName(digest, sha256.Size*2) || size < 0 {
+			rows.Close()
+			return errors.New("Local Cache metadata contains an invalid artifact identity")
 		}
 		referenced[digest] = struct{}{}
 	}
@@ -662,6 +784,18 @@ func isLowerHexName(value string, length int) bool {
 func validateKey(key Key) error {
 	if key.Integration == "" || key.Project == "" || key.Compatibility == "" || key.Native == "" {
 		return errors.New("integration, project, compatibility, and native key are required")
+	}
+	for name, value := range map[string]string{
+		"integration": key.Integration, "project": key.Project, "compatibility": key.Compatibility,
+		"native key": key.Native, "version": key.Version, "ref": key.Ref,
+	} {
+		limit := 512
+		if name == "native key" {
+			limit = 1024
+		}
+		if len(value) > limit || strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("%s is invalid or exceeds %d bytes", name, limit)
+		}
 	}
 	return nil
 }
