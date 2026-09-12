@@ -17,4 +17,4 @@ outputs:
     description: Credential expiration time.
 runs:
   using: node24
-  main: main.mjs
+  main: main.ts

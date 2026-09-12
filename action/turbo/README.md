@@ -1,5 +1,11 @@
 # Native Turbo action
 
+The action and its tests are TypeScript. The Node 24 action runtime executes
+erasable TypeScript directly, with no generated bundle. CI separately runs
+strict typechecking because Node's type stripping does not check types.
+The older setup action still supplies shared JavaScript OIDC helpers; this
+change does not rewrite that existing implementation or the Go service.
+
 This action connects Turbo directly to Team Cache. It requires no CLI download,
 consumer script, extra npm dependency, or long-lived CI secret. Its tests belong
 in this repository. Use `action/setup` instead when you also want a Layer Cache

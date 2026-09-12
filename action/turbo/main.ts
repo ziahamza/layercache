@@ -1,7 +1,13 @@
 import { pathToFileURL } from 'node:url';
 import { endpointURL, exchangeTurbo, fileCommand } from '../setup/main.mjs';
 
-export async function setupTurbo(env = process.env, { fetcher = fetch, log = value => process.stdout.write(value), write = fileCommand } = {}) {
+interface Dependencies {
+  fetcher?: typeof fetch;
+  log?: (value: string) => void;
+  write?: (path: string, name: string, value: string) => void;
+}
+
+export async function setupTurbo(env: NodeJS.ProcessEnv = process.env, { fetcher = fetch, log = value => process.stdout.write(value), write = fileCommand }: Dependencies = {}): Promise<void> {
   const endpoint = (env['INPUT_TEAM-URL'] || '').trim();
   const project = (env.INPUT_PROJECT || `github.com/${env.GITHUB_REPOSITORY || ''}`).trim().toLowerCase();
   const compatibility = (env.INPUT_COMPATIBILITY || '').trim();

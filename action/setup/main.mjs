@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 
 const actionDir = dirname(fileURLToPath(import.meta.url));
 const commandEscape = value => String(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
-const defaultLog = value => process.stdout.write(value);
+const defaultLog = value => { process.stdout.write(value); };
 export const mask = (value, log = defaultLog) => { if (value) log(`::add-mask::${commandEscape(value)}\n`); };
 export function fileCommand(path, name, value) {
   if (!path || !/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(name)) throw new Error('Invalid GitHub file command');
