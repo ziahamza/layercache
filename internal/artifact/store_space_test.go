@@ -68,7 +68,7 @@ func TestPutUsesFivePercentOfVolumeWhenItExceedsFixedReserve(t *testing.T) {
 	}
 }
 
-func TestPutTreatsConfiguredMinFreeBytesAsAnUpwardOverride(t *testing.T) {
+func TestPutTreatsConfiguredMinFreeBytesAsAnExplicitOverride(t *testing.T) {
 	const gib = int64(1024 * 1024 * 1024)
 
 	store, err := Open(context.Background(), t.TempDir(), 1<<20, 12*gib)
@@ -87,6 +87,18 @@ func TestPutTreatsConfiguredMinFreeBytesAsAnUpwardOverride(t *testing.T) {
 	_, _, err = store.Put(context.Background(), recoveryTestKey("configured-reserve"), Metadata{}, bytes.NewReader([]byte("new")))
 	if !errors.Is(err, ErrMinFreeSpace) {
 		t.Fatalf("Put error = %v, want configured reserve rejection", err)
+	}
+}
+
+func TestExplicitReserveReplacesPercentageFloor(t *testing.T) {
+	const gib = int64(1024 * 1024 * 1024)
+	for _, test := range []struct{ configured, want int64 }{
+		{0, 50 * gib}, {10 * gib, 10 * gib}, {1, 5 * gib}, {60 * gib, 60 * gib},
+	} {
+		store := &Store{minFreeBytes: test.configured}
+		if got := store.effectiveReserve(1000 * gib); got != test.want {
+			t.Fatalf("configured %d: reserve = %d, want %d", test.configured, got, test.want)
+		}
 	}
 }
 

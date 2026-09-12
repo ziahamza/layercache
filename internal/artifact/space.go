@@ -117,10 +117,13 @@ func (store *Store) readFilesystemSpace() (filesystemSpace, error) {
 }
 
 func (store *Store) effectiveReserve(totalBytes int64) int64 {
-	reserve := minimumFreeBytesFloor
-	if store.minFreeBytes > reserve {
-		reserve = store.minFreeBytes
+	// An explicit reserve replaces the automatic percentage, while retaining
+	// the absolute safety floor. Otherwise large disks cannot opt into a
+	// smaller, deliberate reserve.
+	if store.minFreeBytes > 0 {
+		return max(minimumFreeBytesFloor, store.minFreeBytes)
 	}
+	reserve := minimumFreeBytesFloor
 	if fivePercent := totalBytes / 20; fivePercent > reserve {
 		reserve = fivePercent
 	}
