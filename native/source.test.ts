@@ -1,0 +1,37 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, writeFile, rename, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { sourceKey } from './source.ts';
+
+test('source keys ignore worktree paths but include dirty contents, filenames and untracked sources', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'layercache-source-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo');
+  const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  git(['init', '--quiet', repo]);
+  await writeFile(join(repo, 'source.ts'), 'original');
+  await writeFile(join(repo, '.gitignore'), '.env\nbuild/\n');
+  git(['-C', repo, 'add', '.']);
+  git(['-C', repo, '-c', 'user.name=QA', '-c', 'user.email=qa@example.invalid', 'commit', '--quiet', '-m', 'fixture']);
+  const worktree = join(root, 'worktree');
+  git(['-C', repo, 'worktree', 'add', '--detach', worktree]);
+  const original = await sourceKey(repo);
+  assert.equal(await sourceKey(worktree), original);
+  await writeFile(join(worktree, '.env'), 'SECRET=never-hash-ignored-env');
+  assert.equal(await sourceKey(worktree), original);
+  await writeFile(join(worktree, 'source.ts'), 'dirty');
+  assert.notEqual(await sourceKey(worktree), original);
+  await writeFile(join(worktree, 'source.ts'), 'original');
+  await writeFile(join(worktree, 'new.ts'), 'new source');
+  const added = await sourceKey(worktree);
+  assert.notEqual(added, original);
+  await rename(join(worktree, 'new.ts'), join(worktree, 'renamed.ts'));
+  assert.notEqual(await sourceKey(worktree), added);
+  await rm(join(worktree, 'renamed.ts'));
+  assert.equal(await sourceKey(worktree), original);
+  await rm(join(worktree, 'source.ts'));
+  assert.notEqual(await sourceKey(worktree), original);
+});

@@ -1,0 +1,20 @@
+{
+  "name": "@layercache/native",
+  "version": "0.0.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "native/dist/expo.cjs",
+  "exports": { ".": "./native/dist/expo.cjs", "./client": "./native/dist/client.js" },
+  "bin": { "layercache-native": "native/dist/cli.js" },
+  "files": ["native/dist", "native/README.md", "LICENSE"],
+  "engines": { "node": ">=24" },
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "build": "node native/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test native/*.test.ts",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "dependencies": { "tar": "7.5.22" },
+  "devDependencies": { "@types/node": "24.13.3", "esbuild": "0.28.2", "typescript": "5.9.3" }
+}

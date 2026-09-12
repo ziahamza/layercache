@@ -3,54 +3,13 @@ import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { endpointURL, exchangeTurbo, fileCommand } from './auth.ts';
+export { endpointURL, exchangeTurbo, fileCommand } from './auth.ts';
 
 const actionDir = dirname(fileURLToPath(import.meta.url));
 const commandEscape = value => String(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
 const defaultLog = value => { process.stdout.write(value); };
 export const mask = (value, log = defaultLog) => { if (value) log(`::add-mask::${commandEscape(value)}\n`); };
-export function fileCommand(path, name, value) {
-  if (!path || !/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(name)) throw new Error('Invalid GitHub file command');
-  const delimiter = `layercache_${randomUUID()}`;
-  appendFileSync(path, `${name}<<${delimiter}\n${value}\n${delimiter}\n`, { mode: 0o600 });
-}
-export function endpointURL(value) {
-  const url = new URL(value);
-  if (url.username || url.password || url.search || url.hash ||
-      (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)))) {
-    throw new Error('Team Cache requires HTTPS, or HTTP on loopback');
-  }
-  return url;
-}
-export async function exchangeTurbo({ endpoint, project, compatibility, minutes, env, fetcher = fetch, log = defaultLog }) {
-  if (!env.ACTIONS_ID_TOKEN_REQUEST_URL || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) throw new Error('Team Cache OIDC needs job permissions id-token: write');
-  const oidc = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
-  if (oidc.protocol !== 'https:') throw new Error('GitHub OIDC request URL must use HTTPS');
-  oidc.searchParams.set('audience', `layercache:${project}`);
-  const response = await fetcher(oidc, {
-    headers: { Authorization: `Bearer ${env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
-    redirect: 'error', signal: AbortSignal.timeout(20_000),
-  });
-  if (!response.ok) throw new Error(`GitHub OIDC returned HTTP ${response.status}`);
-  const identity = await response.json();
-  if (typeof identity.value !== 'string' || !identity.value) throw new Error('GitHub OIDC did not return a token');
-  mask(identity.value, log);
-  const url = endpointURL(endpoint);
-  url.pathname = `${url.pathname.replace(/\/+$/, '').replace(/\/v1$/, '')}/v1/auth/github-oidc/exchange`;
-  const exchanged = await fetcher(url, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project, compatibility, idToken: identity.value, integration: 'turbo', ttlSeconds: minutes * 60 }),
-    redirect: 'error', signal: AbortSignal.timeout(20_000),
-  });
-  if (!exchanged.ok) throw new Error(`Turbo OIDC exchange returned HTTP ${exchanged.status}`);
-  const result = await exchanged.json();
-  if (typeof result.teamToken !== 'string' || !result.teamToken || !Number.isFinite(Date.parse(result.expiresAt)) ||
-      Date.parse(result.expiresAt) < Date.now() + 30_000 || Date.parse(result.expiresAt) > Date.now() + 3_660_000) {
-    throw new Error('Turbo OIDC exchange returned invalid credentials');
-  }
-  mask(result.teamToken, log);
-  return result;
-}
 async function availablePort() {
   const listener = createServer();
   await new Promise((resolve, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', resolve); });

@@ -111,6 +111,11 @@ for the remaining source-publication gates.
 The [four-project rollout report](docs/rollout-2026-09-12.md) records main-branch
 remote-hit evidence, deployment fixes, and remaining qualification limits.
 
+[Native build caching](native/README.md) adds an Expo development-client provider,
+a local CLI shared across worktrees, and `action/native` for checking verified
+artifacts on Linux before scheduling a project's existing Mac runner. It does
+not host runners or replace production signing, repacking, or OTA delivery.
+
 The daemon implements Turborepo's authenticated v8 artifact API. `layercache run` mints a short-lived Workspace token and injects `TURBO_API`, `TURBO_TOKEN`, and `TURBO_TEAM` for one command:
 
 ```bash

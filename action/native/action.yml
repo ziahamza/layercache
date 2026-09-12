@@ -1,0 +1,35 @@
+name: Layer Cache native artifacts
+description: Reuse verified native artifacts from local development or CI before allocating a build runner.
+inputs:
+  operation:
+    description: restore or save. A restore without path verifies the archive without extracting it.
+    default: restore
+  team-url:
+    description: HTTPS Team Cache origin.
+    required: true
+  project:
+    description: Project identity, defaults to github.com/owner/repo.
+  compatibility:
+    description: Explicit target Xcode/SDK/architecture/configuration identity, identical on lookup and build jobs.
+    required: true
+  key:
+    description: Build identity. Defaults to all Git source names/modes/contents, including dirty files. Supply build-affecting environment through compatibility.
+  path:
+    description: Build file/directory to save, or a new directory to restore into.
+  max-bytes:
+    description: Maximum local archive cache bytes.
+    default: '5368709120'
+outputs:
+  key:
+    description: Resolved source key. Pass this from the Linux lookup job to the build job save step.
+  cache-hit:
+    description: True only after downloading and verifying the complete archive.
+  source:
+    description: local, team, miss, or degraded.
+  digest:
+    description: Verified archive SHA-256.
+  elapsed-ms:
+    description: Time spent on the cache operation, not an estimate of compute saved.
+runs:
+  using: node24
+  main: dist/main.cjs
