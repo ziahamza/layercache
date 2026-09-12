@@ -1,7 +1,8 @@
 # Open-source preparation
 
-The repository is still private. This preparation does not change visibility,
-choose a license, publish a CLI release, or enable Public Builds.
+The owner approved publication on 2026-09-12. The repository is public under
+the MIT license. No CLI release or Public Builds deployment was part of this
+visibility change.
 
 ## Direct action imports
 
@@ -16,17 +17,15 @@ including reruns of older commits. Keep action tests and typechecking green.
 Use an immutable commit to roll back a consumer. Add versioned action releases
 later without changing the Team Cache protocol.
 
-Private action sharing currently supports consumers under the same GitHub owner.
-GitEnv belongs to another owner and must not merge its direct-import change until
-this repository is public and its organization permits the action. A skipped
-action step is not a reliable way to avoid private-action download restrictions.
+Consumers can now import the action across GitHub owners, subject to their
+organization's Actions policy. The earlier private-sharing restriction no longer
+requires an actions-only mirror.
 
 ## Before publication
 
-- Choose and add an open-source license with the correct copyright holder.
-- Approve the public visibility change explicitly. Publishing exposes Git history
-  as well as current source. This pass did not inspect secrets or audit history;
-  it does not establish that publication is safe.
+- MIT license and explicit public visibility approval are complete. Publication
+  exposes Git history as well as current source. This pass did not inspect
+  secrets or audit history; it is not a security-audit claim.
 - Keep runtime configuration, credentials, cache data, and machine-specific
   deployment material outside the source distribution. Ignore rules reduce
   accidental additions but do not remove already tracked files or history.

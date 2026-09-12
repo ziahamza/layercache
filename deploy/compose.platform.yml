@@ -1,0 +1,57 @@
+# Personal host wiring supplies image and state paths through its include env.
+services:
+  layercache-gateway:
+    image: ${LAYER_CACHE_IMAGE:?Set a tested local image digest}
+    pull_policy: never
+    command: ["serve-projects", "--config", "/etc/layercache-gateway/config.json"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "65532:65532"
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 2.0
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Existing PostgreSQL/MinIO are loopback-only; the API also binds loopback.
+    network_mode: host
+    volumes:
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/gitenv:/etc/layercache:ro
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/gitenv:/var/lib/layercache
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/agent-access:/etc/layercache-agent-access:ro
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/agent-access:/var/lib/layercache-agent-access
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/parle:/etc/layercache-parle:ro
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/parle:/var/lib/layercache-parle
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/booker:/etc/layercache-booker:ro
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/booker:/var/lib/layercache-booker
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/gateway:/etc/layercache-gateway:ro
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/registry:/etc/layercache-registry:ro
+    tmpfs: ["/tmp:size=67108864,mode=1777"]
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  layercache-registry:
+    image: registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: host
+    env_file:
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/layercache-registry.env
+    volumes:
+      - ${LAYER_CACHE_REGISTRY_CONFIG:?Set registry configuration}:/etc/docker/registry/config.yml:ro
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/registry:/run/registry-secrets:ro
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/data/layercache/registry:/var/lib/registry
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

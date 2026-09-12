@@ -55,6 +55,7 @@ Usage:
   layercache vm-route issue [options]
   layercache run [options] -- COMMAND [ARG...]
   layercache serve [options]
+  layercache serve-projects --config FILE
 `
 
 const (
@@ -96,6 +97,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runIntegration(ctx, args[1:], stdout, stderr)
 	case "serve":
 		return runServe(ctx, args[1:], stderr)
+	case "serve-projects":
+		return runServeProjects(ctx, args[1:], stderr)
 	case "public":
 		return runPublic(ctx, args[1:], stdout, stderr)
 	case "public-build":

@@ -64,6 +64,7 @@ func TestGitHubOIDCCapabilityIsActionsOnly(t *testing.T) {
 		"iat": now.Add(-time.Minute).Unix(), "nbf": now.Add(-time.Minute).Unix(), "exp": now.Add(5 * time.Minute).Unix(),
 		"sub": "repo:acme/widget:ref:refs/heads/main", "repository": "acme/widget",
 		"ref": "refs/heads/main", "sha": strings.Repeat("a", 40),
+		"event_name":   "push",
 		"workflow_ref": "acme/widget/.github/workflows/public-cache.yml@refs/heads/main",
 		"run_id":       "123456789", "run_attempt": "2", "check_run_id": "987654321",
 	})

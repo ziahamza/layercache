@@ -127,10 +127,10 @@ func (server *Server) githubOIDCCapabilityExchange(writer http.ResponseWriter, r
 	if input.Integration == "" {
 		input.Integration = "actions"
 	}
-	if (input.Integration != "actions" && input.Integration != "turbo") ||
+	if (input.Integration != "actions" && input.Integration != "turbo" && input.Integration != "buildkit") ||
 		input.TTLSeconds < 0 || input.TTLSeconds > 3600 ||
 		(input.Integration == "actions" && input.TTLSeconds != 0) ||
-		(input.Integration == "turbo" && (input.RecipeDigest != "" || input.Target != "" ||
+		(input.Integration != "actions" && (input.RecipeDigest != "" || input.Target != "" ||
 			input.Platform != "" || input.Toolchain != "" || input.Builder != "")) {
 		server.writeCapabilityExchangeFailure(writer, request)
 		return
@@ -181,6 +181,15 @@ func (server *Server) githubOIDCCapabilityExchange(writer http.ResponseWriter, r
 	if input.TTLSeconds != 0 {
 		expiresAt = now.Add(time.Duration(input.TTLSeconds) * time.Second)
 	}
+	capabilities := []access.Capability{access.CapabilityWrite}
+	// Turbo hashes and registry tags share a project namespace, unlike Actions
+	// archives. A PR must not poison main's cache, including pull_request_target
+	// tokens whose ref is main. Missing/unknown event claims fail closed to reads.
+	trustedEvent := identity.EventName == "push" || identity.EventName == "workflow_dispatch" || identity.EventName == "schedule"
+	if (input.Integration == "buildkit" || input.Integration == "turbo") &&
+		(identity.Ref != server.config.ActionsDefaultRef || !trustedEvent) {
+		capabilities = []access.Capability{access.CapabilityRead}
+	}
 	token, err := access.MintCapabilityToken(server.config.LocalToken, access.Claims{
 		Subject: "github-actions:" + identity.Subject, Project: server.config.ProjectID, Integration: input.Integration,
 		RunID:         "github-actions:" + strings.ToLower(identity.Repository) + ":" + identity.RunID + ":" + identity.RunAttempt,
@@ -188,7 +197,7 @@ func (server *Server) githubOIDCCapabilityExchange(writer http.ResponseWriter, r
 		Compatibility: input.Compatibility, Repository: strings.ToLower(identity.Repository),
 		Ref: identity.Ref, DefaultRef: server.config.ActionsDefaultRef, SourceCommit: strings.ToLower(identity.Commit),
 		RecipeDigest: recipe, Target: target, Platform: platform, Toolchain: toolchain, Builder: builder,
-		Capabilities: []access.Capability{access.CapabilityWrite}, ExpiresAt: expiresAt,
+		Capabilities: capabilities, ExpiresAt: expiresAt,
 	}, now)
 	if err != nil {
 		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "issue project capability"})

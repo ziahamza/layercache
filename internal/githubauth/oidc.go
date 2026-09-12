@@ -23,6 +23,7 @@ const DefaultOIDCIssuer = "https://token.actions.githubusercontent.com"
 
 type ActionsIdentity struct {
 	Subject         string
+	EventName       string
 	Repository      string
 	Ref             string
 	Commit          string
@@ -98,7 +99,8 @@ func (verifier *OIDCVerifier) Verify(ctx context.Context, rawToken, audience str
 		return ActionsIdentity{}, errors.New("GitHub Actions OIDC token is not valid yet")
 	}
 	identity := ActionsIdentity{
-		Subject: stringClaim(claims, "sub"), Repository: stringClaim(claims, "repository"),
+		EventName: stringClaim(claims, "event_name"),
+		Subject:   stringClaim(claims, "sub"), Repository: stringClaim(claims, "repository"),
 		Ref: stringClaim(claims, "ref"), Commit: stringClaim(claims, "sha"),
 		WorkflowRef: stringClaim(claims, "workflow_ref"), JobWorkflowRef: stringClaim(claims, "job_workflow_ref"),
 		RepositoryOwner: stringClaim(claims, "repository_owner"),

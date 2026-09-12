@@ -36,6 +36,14 @@ redacted error. Invoke only for trusted workflows; this action does not decide
 which repository events you trust. Do not use `pull_request_target` to execute
 untrusted checkout contents. No Actions cache environment variables are changed.
 
+Team Cache enforces write authority independently of the workflow step condition.
+Turbo writes require the configured default branch and a signed GitHub `push`,
+`workflow_dispatch`, or `schedule` event. Other refs/events get read-only
+credentials. This prevents PRs from overwriting main's shared Turbo cache.
+GitHub's signature, issuer, expiry, repository, and project audience are checked;
+workflow filenames are not separately allowlisted. Project members and the cache
+administrator remain trusted writers through their own credentials.
+
 This action does not require Public Builds or a published CLI release. Turbo
 keeps its ordinary local cache. Full Local Cache management and CLI ROI reports
 are provided by `action/setup`.

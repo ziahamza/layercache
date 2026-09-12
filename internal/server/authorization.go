@@ -22,7 +22,7 @@ func (server *Server) requireToken(next http.Handler) http.Handler {
 
 		required, integration := requiredRequestCapability(request)
 		claims, ok := server.authenticateRequest(request, integration)
-		if !ok || !claims.Allows(required) || !server.authorizesSelectors(request, claims) {
+		if !ok || !claims.Allows(required) || !server.authorizesSelectors(request, claims) || !server.currentMembershipAllows(request.Context(), claims, required) {
 			server.writeAuthorizationFailure(writer, request)
 			return
 		}
