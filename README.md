@@ -86,6 +86,28 @@ Deletion is limited to the exact configured data directory and requires a matchi
 
 ## Turborepo
 
+For GitHub CI, use the [native Turbo action](action/turbo/README.md). It needs
+no CLI release, consumer script, or long-lived cache secret:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+steps:
+  # Check out the project, configure Node/pnpm, and install dependencies first.
+  - uses: ziahamza/layercache/action/turbo@main
+    with:
+      team-url: https://cache.example.com
+      compatibility: linux-amd64-node24-schema1
+  - run: pnpm turbo run build
+```
+
+Use your Team Cache origin and a compatibility identity for your build toolchain.
+The server must authorize your repository. `main` intentionally tracks current
+code until versioning is introduced. Public action source does not grant access
+to anyone else's Team Cache. See the [publication checklist](docs/open-source-preparation.md)
+for the remaining source-publication gates.
+
 The daemon implements Turborepo's authenticated v8 artifact API. `layercache run` mints a short-lived Workspace token and injects `TURBO_API`, `TURBO_TOKEN`, and `TURBO_TEAM` for one command:
 
 ```bash

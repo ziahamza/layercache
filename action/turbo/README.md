@@ -17,15 +17,17 @@ permissions:
   id-token: write
 steps:
   - uses: actions/checkout@v4
-  - uses: ziahamza/layercache/action/turbo@FULL_COMMIT_SHA
+  - uses: ziahamza/layercache/action/turbo@main
     with:
       team-url: https://layer-cache.ziahamza.com
       compatibility: linux-amd64-node24-schema1
   - run: pnpm turbo run build
 ```
 
-Replace the placeholder with a reviewed published commit. Repository visibility
-and action access must permit the caller to use it. Configure the language tools
+`main` tracks the latest action code, including changes between workflow reruns.
+This is the current pre-versioning integration policy. Use a reviewed commit SHA
+when reproducibility is required. Repository visibility and action access must
+permit the caller to use it. Configure the language tools
 and dependencies as usual. The project defaults to the lowercase GitHub repository
 identity. Choose compatibility explicitly; only compatible builds should share it.
 

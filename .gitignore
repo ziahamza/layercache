@@ -11,3 +11,10 @@
 *.db-wal
 .DS_Store
 node_modules/
+# Machine-local credentials and environment files are never distribution inputs.
+.env
+.env.*
+!.env.example
+!.env.*.example
+/deploy/registry-credentials/
+/secrets/
