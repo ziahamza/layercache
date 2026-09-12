@@ -108,6 +108,9 @@ code until versioning is introduced. Public action source does not grant access
 to anyone else's Team Cache. See the [publication checklist](docs/open-source-preparation.md)
 for the remaining source-publication gates.
 
+The [four-project rollout report](docs/rollout-2026-09-12.md) records main-branch
+remote-hit evidence, deployment fixes, and remaining qualification limits.
+
 The daemon implements Turborepo's authenticated v8 artifact API. `layercache run` mints a short-lived Workspace token and injects `TURBO_API`, `TURBO_TOKEN`, and `TURBO_TEAM` for one command:
 
 ```bash
