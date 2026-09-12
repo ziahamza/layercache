@@ -629,6 +629,11 @@ func (server *Server) getTurbo(writer http.ResponseWriter, request *http.Request
 			if cleanup != nil {
 				cleanup()
 			}
+			if errors.Is(verifyErr, artifact.ErrQuota) {
+				writer.Header().Set("x-layercache-degraded", "verification-staging-full")
+				writeJSON(writer, http.StatusInsufficientStorage, map[string]string{"error": "insufficient verification staging space"})
+				return
+			}
 			if errors.Is(verifyErr, artifact.ErrCorrupt) {
 				_ = server.store.Delete(context.WithoutCancel(request.Context()), key)
 				writer.WriteHeader(http.StatusNotFound)

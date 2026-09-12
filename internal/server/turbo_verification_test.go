@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,12 +29,20 @@ func TestCloudTurboReadIsVerifiedBeforeHTTPResponse(t *testing.T) {
 	}
 	entry := artifact.Entry{Key: key, Digest: hex.EncodeToString(digest[:]), Size: int64(len(good))}
 	for _, test := range []struct {
-		name       string
-		open       func() io.ReadCloser
-		wantStatus int
-		wantBody   []byte
-		wantDelete bool
+		name         string
+		open         func() io.ReadCloser
+		wantStatus   int
+		wantBody     []byte
+		wantDelete   bool
+		minFreeBytes int64
 	}{
+		{
+			name:         "disk reserve rejects staging without deleting cloud artifact",
+			open:         func() io.ReadCloser { return io.NopCloser(bytes.NewReader(good)) },
+			minFreeBytes: math.MaxInt64,
+			wantStatus:   http.StatusInsufficientStorage,
+			wantBody:     []byte("{\"error\":\"insufficient verification staging space\"}\n"),
+		},
 		{
 			name: "normal verified stream",
 			open: func() io.ReadCloser {
@@ -51,7 +60,7 @@ func TestCloudTurboReadIsVerifiedBeforeHTTPResponse(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			local, err := artifact.Open(context.Background(), root, 1<<20, 0)
+			local, err := artifact.Open(context.Background(), root, 1<<20, test.minFreeBytes)
 			if err != nil {
 				t.Fatal(err)
 			}
