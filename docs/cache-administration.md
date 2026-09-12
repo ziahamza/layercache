@@ -1,5 +1,7 @@
 # Team Cache quotas and pins
 
+These commands administer PostgreSQL/S3-backed caches. For embedded Local or development Team Cache, change `setup --max-size` while the daemon is stopped, then restart it. The administrator pin commands require cloud persistence.
+
 Run these commands on the Team or Public API host with its protected configuration:
 
 ```bash

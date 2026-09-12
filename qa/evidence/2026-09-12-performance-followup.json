@@ -1,0 +1,1785 @@
+{
+  "description": "Follow-up runs using the final product source after the proxy fix. The first two runs used wall-time calibration and include its retained minimum-client failure. The final two use measured CPU calibration and passed. Null warm fields identify the failed sample that did not reach restoration. Full reports remain in /tmp/layercache-sequence-final.J8XmmKr5.",
+  "runs": [
+    {
+      "schemaVersion": "layercache.performance.v1",
+      "binarySha256": "sha256:4ea763dee949d8209770869d335680ddb87f2fc9d058415684dd0c7d6f75c26f",
+      "platform": "linux/amd64",
+      "turboVersion": "2.10.12",
+      "nodeVersion": "v24.13.0",
+      "pbkdf2Iterations": 12893642,
+      "calibration": null,
+      "startedAt": "2026-09-12T06:56:00.086932429Z",
+      "finishedAt": "2026-09-12T06:57:04.839668728Z",
+      "passed": true,
+      "error": null,
+      "sources": [
+        {
+          "source": "local",
+          "coldMedianMs": 2686.427678,
+          "warmMedianMs": 98.605755,
+          "warmColdRatio": 0.03670515897655221,
+          "passed": true,
+          "samples": [
+            {
+              "index": 1,
+              "artifactSha256": "sha256:ca5833e144e8931c3bf55264c32776a51923b66a77c1e2fa5e9f540f91fe884a",
+              "coldDurationMs": 3398.161684,
+              "warmDurationMs": 103.165516,
+              "coldTaskHash": "c1f659da69db3650",
+              "warmTaskHash": "c1f659da69db3650",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 3282,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 2,
+              "artifactSha256": "sha256:ec0d5bde134f2577816c0979fcaaea5f88693e6f0c38012a15695b959c85c056",
+              "coldDurationMs": 2657.941262,
+              "warmDurationMs": 98.605755,
+              "coldTaskHash": "5ea3fc9b63ea8e87",
+              "warmTaskHash": "5ea3fc9b63ea8e87",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2553,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 3,
+              "artifactSha256": "sha256:babcd564d1fed9f362ab19ad82b6b8dd0882e97efae20d72af05ebeb21a17b75",
+              "coldDurationMs": 2606.254758,
+              "warmDurationMs": 109.953517,
+              "coldTaskHash": "a97eb8e60ff49de0",
+              "warmTaskHash": "a97eb8e60ff49de0",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2501,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 4,
+              "artifactSha256": "sha256:437f5a72b2f7947ba93ff8947c9fb94d6aa3ecaf7a89fbe582c7a77ecf98367c",
+              "coldDurationMs": 2921.876564,
+              "warmDurationMs": 83.437405,
+              "coldTaskHash": "ff1ffd82b1c942c8",
+              "warmTaskHash": "ff1ffd82b1c942c8",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2816,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 5,
+              "artifactSha256": "sha256:55ed7edad0b17de8830a257957c101eb47e619a26ebb6d968085d6cfc65e676d",
+              "coldDurationMs": 2339.069984,
+              "warmDurationMs": 88.939732,
+              "coldTaskHash": "f271a033bbb68c52",
+              "warmTaskHash": "f271a033bbb68c52",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2246,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 6,
+              "artifactSha256": "sha256:2129417d6b928a332b2c84b88cb4e5643511eb8c08c0892f194cc98c16cd97df",
+              "coldDurationMs": 2868.98549,
+              "warmDurationMs": 145.909704,
+              "coldTaskHash": "186ee95dc6305994",
+              "warmTaskHash": "186ee95dc6305994",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2748,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 7,
+              "artifactSha256": "sha256:eaee43938248e47877a395e7f11d15ca78d0aad194b31984d17e088a523e6fee",
+              "coldDurationMs": 2825.13412,
+              "warmDurationMs": 135.453857,
+              "coldTaskHash": "22fc303e7e730451",
+              "warmTaskHash": "22fc303e7e730451",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2677,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 8,
+              "artifactSha256": "sha256:b6f0606a00ca64b8ef4708dda408b35a177b73eb1135028bdc7e54319c3fb92b",
+              "coldDurationMs": 2667.597772,
+              "warmDurationMs": 119.213077,
+              "coldTaskHash": "8277fe14f7822ed4",
+              "warmTaskHash": "8277fe14f7822ed4",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2538,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 9,
+              "artifactSha256": "sha256:b5c73bbab95c13a6f63a2b6299748a32f940f0425a7a3d9886714e8d9b67623b",
+              "coldDurationMs": 2686.427678,
+              "warmDurationMs": 95.889018,
+              "coldTaskHash": "7e6307949766c8cc",
+              "warmTaskHash": "7e6307949766c8cc",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2574,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 10,
+              "artifactSha256": "sha256:1ae6fdd88b5eed18b1d8597fe70607e29f2df246477a4fa5ab1c3fbbb76b54c7",
+              "coldDurationMs": 3034.062733,
+              "warmDurationMs": 97.846206,
+              "coldTaskHash": "3b9d6eeffd69e0c5",
+              "warmTaskHash": "3b9d6eeffd69e0c5",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2878,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 11,
+              "artifactSha256": "sha256:7b42734fe2ddbbaadd92a27b96b0988d3bfdb0edd61c75aa9f6a06952f7ae4c9",
+              "coldDurationMs": 2434.315358,
+              "warmDurationMs": 97.263083,
+              "coldTaskHash": "c8618cd0371060b2",
+              "warmTaskHash": "c8618cd0371060b2",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2327,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            }
+          ]
+        },
+        {
+          "source": "team",
+          "coldMedianMs": 2602.083075,
+          "warmMedianMs": 113.421806,
+          "warmColdRatio": 0.04358884890713952,
+          "passed": true,
+          "samples": [
+            {
+              "index": 1,
+              "artifactSha256": "sha256:62e2bbe7c994f0f55408fc86a11a5271e0212da5e95e32c15980a5bc40eab1fb",
+              "coldDurationMs": 2631.156443,
+              "warmDurationMs": 130.140819,
+              "coldTaskHash": "0ae09f0959d38d19",
+              "warmTaskHash": "0ae09f0959d38d19",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2476,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 2,
+              "artifactSha256": "sha256:c04dca03c10967fc5f50dd0342b67eef23bde736c9d42da0662e4eb77fce7279",
+              "coldDurationMs": 2760.758856,
+              "warmDurationMs": 118.974528,
+              "coldTaskHash": "cafc074ef12a4f6c",
+              "warmTaskHash": "cafc074ef12a4f6c",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2600,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 3,
+              "artifactSha256": "sha256:307108ba0481cece257293437d189dbce7165426223a780bf6013f020f27acfc",
+              "coldDurationMs": 2746.646854,
+              "warmDurationMs": 103.154987,
+              "coldTaskHash": "ac8d603399ffd55c",
+              "warmTaskHash": "ac8d603399ffd55c",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2595,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 4,
+              "artifactSha256": "sha256:ea350e44437980f37ff29408bbfb3061ab362cf9f02d205ff804c2f8be366896",
+              "coldDurationMs": 2540.863446,
+              "warmDurationMs": 106.104674,
+              "coldTaskHash": "b20ad58041246a53",
+              "warmTaskHash": "b20ad58041246a53",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2404,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 5,
+              "artifactSha256": "sha256:a50b0be8efa6093b9763d9eb6336701ee6c63221ddae7f26a1f6d33ea2ae53fe",
+              "coldDurationMs": 2474.740934,
+              "warmDurationMs": 106.628765,
+              "coldTaskHash": "26fb3c148b960a08",
+              "warmTaskHash": "26fb3c148b960a08",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2328,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 6,
+              "artifactSha256": "sha256:b82b363c698e1d4bcbbb68551f0c32325143adb0d5474513272457940bf57119",
+              "coldDurationMs": 2509.546206,
+              "warmDurationMs": 113.115711,
+              "coldTaskHash": "532b20d6457de373",
+              "warmTaskHash": "532b20d6457de373",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2338,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 7,
+              "artifactSha256": "sha256:383531ab5536ad52129379e52d2978adc93cb83f42ec9abc1433d160a6e294aa",
+              "coldDurationMs": 2584.155988,
+              "warmDurationMs": 102.145455,
+              "coldTaskHash": "6d6ded3e0db9fbc4",
+              "warmTaskHash": "6d6ded3e0db9fbc4",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2451,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 8,
+              "artifactSha256": "sha256:482ccff8d0d12f611e93e72129fb2af81db0a534e53a4baf137552f4b23a645d",
+              "coldDurationMs": 2488.839964,
+              "warmDurationMs": 113.421806,
+              "coldTaskHash": "8e03ed86ddfda697",
+              "warmTaskHash": "8e03ed86ddfda697",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2342,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 9,
+              "artifactSha256": "sha256:b42da8fe77266fe10b7b6fdb937b2071f63d4db019f24d428bb1236272ea597f",
+              "coldDurationMs": 2602.083075,
+              "warmDurationMs": 148.065316,
+              "coldTaskHash": "a1b8884ebe83c9d9",
+              "warmTaskHash": "a1b8884ebe83c9d9",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2425,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 10,
+              "artifactSha256": "sha256:1ef7dd56a7afe47c0208a8386b2efd3d72d23cd35d5bf35107fc99365d18cd7a",
+              "coldDurationMs": 3009.32524,
+              "warmDurationMs": 166.941065,
+              "coldTaskHash": "d82e8ff6762e1e02",
+              "warmTaskHash": "d82e8ff6762e1e02",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2810,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 11,
+              "artifactSha256": "sha256:24d07f1f8bd4f620c2761082733af955f2e6442a401780b1a11ef97037803450",
+              "coldDurationMs": 2804.382323,
+              "warmDurationMs": 188.406405,
+              "coldTaskHash": "ac23d4871f0758b6",
+              "warmTaskHash": "ac23d4871f0758b6",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2636,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schemaVersion": "layercache.performance.v1",
+      "binarySha256": "sha256:4ea763dee949d8209770869d335680ddb87f2fc9d058415684dd0c7d6f75c26f",
+      "platform": "linux/amd64",
+      "turboVersion": "2.9.14",
+      "nodeVersion": "v24.13.0",
+      "pbkdf2Iterations": 2951877,
+      "calibration": null,
+      "startedAt": "2026-09-12T06:57:47.272767592Z",
+      "finishedAt": "2026-09-12T06:58:29.042422661Z",
+      "passed": false,
+      "error": "team sample 9: cold build did not record a cache miss, at least one second of real execution, and uploaded bytes",
+      "sources": [
+        {
+          "source": "local",
+          "coldMedianMs": 1821.9639,
+          "warmMedianMs": 271.787957,
+          "warmColdRatio": 0.14917307472447724,
+          "passed": true,
+          "samples": [
+            {
+              "index": 1,
+              "artifactSha256": "sha256:aba7f098ef106d1d9a24d7913536c4e1231ab4d89a62a76ac3c2319b4d09d418",
+              "coldDurationMs": 3421.207293,
+              "warmDurationMs": 271.787957,
+              "coldTaskHash": "02066506bbae8c2a",
+              "warmTaskHash": "02066506bbae8c2a",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 3093,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 2,
+              "artifactSha256": "sha256:51ad79b6b9f44d9a61e8bd6e764a008e71c058bb9af041fff8b3d30b12192f78",
+              "coldDurationMs": 3100.682985,
+              "warmDurationMs": 347.79931,
+              "coldTaskHash": "b6b39250f3e12bf6",
+              "warmTaskHash": "b6b39250f3e12bf6",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2658,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 3,
+              "artifactSha256": "sha256:843cac6cb7f59fea766b11394d8a80a0e80ededda57e745a161614f250180606",
+              "coldDurationMs": 2097.819051,
+              "warmDurationMs": 274.09465,
+              "coldTaskHash": "04d902e7d47f79c4",
+              "warmTaskHash": "04d902e7d47f79c4",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1766,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 4,
+              "artifactSha256": "sha256:30094d0405416b48761de870d2a2e6eee8fc7fa3ad4bcaa619549a4012249baa",
+              "coldDurationMs": 1821.9639,
+              "warmDurationMs": 274.729061,
+              "coldTaskHash": "aa788c0e95f84b9d",
+              "warmTaskHash": "aa788c0e95f84b9d",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1576,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 5,
+              "artifactSha256": "sha256:1f71327cd40d006f7bbd46df8a9850fb1b9a9df660d01644e8d88706c0779b2b",
+              "coldDurationMs": 1655.2533,
+              "warmDurationMs": 301.683856,
+              "coldTaskHash": "11617e9155fa68a1",
+              "warmTaskHash": "11617e9155fa68a1",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1436,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 6,
+              "artifactSha256": "sha256:e1c7b91b9de9e52ec2a9fc7dd94fb69f16e2625a463f8a3600cd52a276dd4dd8",
+              "coldDurationMs": 1886.530247,
+              "warmDurationMs": 384.723645,
+              "coldTaskHash": "b156783ab06fb818",
+              "warmTaskHash": "b156783ab06fb818",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1633,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 7,
+              "artifactSha256": "sha256:786fb59041502d20b441459539307bf1251e9d19dd9d54c67141f2785b5146f3",
+              "coldDurationMs": 1876.494564,
+              "warmDurationMs": 183.339676,
+              "coldTaskHash": "c3d4c7e7525d544a",
+              "warmTaskHash": "c3d4c7e7525d544a",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1613,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 8,
+              "artifactSha256": "sha256:f8a135fec7a318ecc0e1f25f6499a827495a6d411dc0e276bd2e861009aaefdc",
+              "coldDurationMs": 1614.755153,
+              "warmDurationMs": 232.650837,
+              "coldTaskHash": "112678d937dc363e",
+              "warmTaskHash": "112678d937dc363e",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1420,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 9,
+              "artifactSha256": "sha256:b34ea97914b25b124c7ea6514b2ae7796f2dbc97f1d31a43668ed2fb845d4c26",
+              "coldDurationMs": 1380.549461,
+              "warmDurationMs": 208.628308,
+              "coldTaskHash": "b6124fe676b6c689",
+              "warmTaskHash": "b6124fe676b6c689",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1166,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 10,
+              "artifactSha256": "sha256:126953d40219d892da73d5b0b21e4ce018220518b0333ec4ae12482f18b42592",
+              "coldDurationMs": 1473.531041,
+              "warmDurationMs": 176.687865,
+              "coldTaskHash": "c668ea52de266ad0",
+              "warmTaskHash": "c668ea52de266ad0",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1261,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 11,
+              "artifactSha256": "sha256:a1e0fd10f573e59f73a1d14f3461b14be3b3c4b964021e645ff26fe371d1e6e0",
+              "coldDurationMs": 1327.313186,
+              "warmDurationMs": 194.052763,
+              "coldTaskHash": "531b410cc3714bd8",
+              "warmTaskHash": "531b410cc3714bd8",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1126,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            }
+          ]
+        },
+        {
+          "source": "team",
+          "coldMedianMs": 0,
+          "warmMedianMs": 0,
+          "warmColdRatio": 0,
+          "passed": false,
+          "samples": [
+            {
+              "index": 1,
+              "artifactSha256": "sha256:c7542dc06080ff8ddc208b6b73b7992e3d27dcaf1a1a9cad9bb8ce455f342138",
+              "coldDurationMs": 1297.109072,
+              "warmDurationMs": 147.931443,
+              "coldTaskHash": "ee9bb0ca11810fd3",
+              "warmTaskHash": "ee9bb0ca11810fd3",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1071,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 2,
+              "artifactSha256": "sha256:da0143b5969dd0231b1e849c50a866d3a401f8f0bdc629696f24c6465c64bc85",
+              "coldDurationMs": 1199.15362,
+              "warmDurationMs": 148.157237,
+              "coldTaskHash": "72d0471fc78a8e52",
+              "warmTaskHash": "72d0471fc78a8e52",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1035,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 3,
+              "artifactSha256": "sha256:b8116785c717cfea8db2833f9ea7b87ffdc52a8b4607e2b254ac75d394aaeaa4",
+              "coldDurationMs": 1154.426026,
+              "warmDurationMs": 147.695718,
+              "coldTaskHash": "86138adf3543c84a",
+              "warmTaskHash": "86138adf3543c84a",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 983,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 4,
+              "artifactSha256": "sha256:d0ccef3fb0f2adf7a1875d654d945e98c8bc7b97718e0de98cf768654e792635",
+              "coldDurationMs": 1289.454345,
+              "warmDurationMs": 175.168412,
+              "coldTaskHash": "871755f5df1cbbca",
+              "warmTaskHash": "871755f5df1cbbca",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1095,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 5,
+              "artifactSha256": "sha256:04487d57b20ab777a8fe97367aaf4f6678089e82f6e8ff8f2093abf22c2cbad6",
+              "coldDurationMs": 1377.689181,
+              "warmDurationMs": 293.300444,
+              "coldTaskHash": "9756db89c7aef77f",
+              "warmTaskHash": "9756db89c7aef77f",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1131,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 6,
+              "artifactSha256": "sha256:91b51ebc874b8a3537adfceefbc26e3c62da144cf7fd0604f9f6056516a75585",
+              "coldDurationMs": 1692.260884,
+              "warmDurationMs": 216.018517,
+              "coldTaskHash": "0655103bb298c980",
+              "warmTaskHash": "0655103bb298c980",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1334,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 7,
+              "artifactSha256": "sha256:7e5b1bfbf429d4c6f8a6a23243121b634c9069456310de86a84104b6c52d23c8",
+              "coldDurationMs": 1181.849718,
+              "warmDurationMs": 120.412565,
+              "coldTaskHash": "365247a296468f3d",
+              "warmTaskHash": "365247a296468f3d",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 1003,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 8,
+              "artifactSha256": "sha256:379e0151d9181456fee8311606b9deedb9150fa0cd49bbdf33bee5b5039cf511",
+              "coldDurationMs": 1146.206142,
+              "warmDurationMs": 140.797161,
+              "coldTaskHash": "b231361389096613",
+              "warmTaskHash": "b231361389096613",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 985,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 9,
+              "artifactSha256": "",
+              "coldDurationMs": 1127.536895,
+              "warmDurationMs": 0,
+              "coldTaskHash": null,
+              "warmTaskHash": null,
+              "coldResult": "miss",
+              "warmResult": null,
+              "warmSource": null,
+              "warmNativeRemoteHit": null,
+              "netEstimatedBuildTimeSaved": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schemaVersion": "layercache.performance.v1",
+      "binarySha256": "sha256:4ea763dee949d8209770869d335680ddb87f2fc9d058415684dd0c7d6f75c26f",
+      "platform": "linux/amd64",
+      "turboVersion": "2.9.14",
+      "nodeVersion": "v24.13.0",
+      "pbkdf2Iterations": 12894907,
+      "calibration": {
+        "method": "process.cpuUsage",
+        "probeIterations": 250000,
+        "probe": {
+          "userCpuUs": 38775,
+          "systemCpuUs": 0,
+          "wallMs": 38.821129
+        },
+        "targetCpuMs": 2000,
+        "iterations": 12894907
+      },
+      "startedAt": "2026-09-12T08:47:34.443661713Z",
+      "finishedAt": "2026-09-12T08:48:35.161539705Z",
+      "passed": true,
+      "error": null,
+      "sources": [
+        {
+          "source": "local",
+          "coldMedianMs": 2520.759678,
+          "warmMedianMs": 95.601735,
+          "warmColdRatio": 0.03792576334601303,
+          "passed": true,
+          "samples": [
+            {
+              "index": 1,
+              "artifactSha256": "sha256:b62ff5c20eda60477f9e51c10cd48d13af8a62c46023bc703358e69a07f5c22a",
+              "coldDurationMs": 2647.290725,
+              "warmDurationMs": 93.981736,
+              "coldTaskHash": "abcb179c4c6f34fd",
+              "warmTaskHash": "abcb179c4c6f34fd",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2544,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 2,
+              "artifactSha256": "sha256:9638a5ca793ae85c01e4990191e8c30b1e7dfec6485d0e59d0b327d3fd7cc680",
+              "coldDurationMs": 2574.49209,
+              "warmDurationMs": 98.593056,
+              "coldTaskHash": "45cf3adcc18c8d26",
+              "warmTaskHash": "45cf3adcc18c8d26",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2444,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 3,
+              "artifactSha256": "sha256:636c6b962d4f985c73c0b785ace356599d21bff674d9024da8c1994a0558e312",
+              "coldDurationMs": 2412.092145,
+              "warmDurationMs": 95.601735,
+              "coldTaskHash": "09fc405202afbc2b",
+              "warmTaskHash": "09fc405202afbc2b",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2308,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 4,
+              "artifactSha256": "sha256:c1747afbf6b1532eaba7d740b959f83691f07a60f679c0dec3bcc6e71ea56b84",
+              "coldDurationMs": 2405.549019,
+              "warmDurationMs": 93.728102,
+              "coldTaskHash": "93818b35714f62c7",
+              "warmTaskHash": "93818b35714f62c7",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2292,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 5,
+              "artifactSha256": "sha256:becdfd73b5d463d20336218f8c3f6e401bd061cfc7bc25b7c7c4f71b4476939f",
+              "coldDurationMs": 2427.633173,
+              "warmDurationMs": 91.476162,
+              "coldTaskHash": "20f205766081b3f5",
+              "warmTaskHash": "20f205766081b3f5",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2324,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 6,
+              "artifactSha256": "sha256:552a006bc157c83ce15fc96e2adba1e8d90662808888b27551bfadc68c4d3636",
+              "coldDurationMs": 2378.932448,
+              "warmDurationMs": 95.31528,
+              "coldTaskHash": "0851f295f079c376",
+              "warmTaskHash": "0851f295f079c376",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2277,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 7,
+              "artifactSha256": "sha256:e522fd2cec71a53a66814aad597e644b1b7e8be206cdffa7abe5c1451098effb",
+              "coldDurationMs": 2560.725902,
+              "warmDurationMs": 109.573141,
+              "coldTaskHash": "c7f778220c082971",
+              "warmTaskHash": "c7f778220c082971",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2444,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 8,
+              "artifactSha256": "sha256:47f313ca6676e6e5a851e19f67c7afaad708f0a0feb3feeca614d084f1c48bd5",
+              "coldDurationMs": 2708.37763,
+              "warmDurationMs": 92.655165,
+              "coldTaskHash": "3c9445f25fad848f",
+              "warmTaskHash": "3c9445f25fad848f",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2592,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 9,
+              "artifactSha256": "sha256:a72e130860e644b384841dc1055348252728bf89434aa7dc0c7093ec9df020ec",
+              "coldDurationMs": 2638.371991,
+              "warmDurationMs": 101.991378,
+              "coldTaskHash": "24af49828d4268dc",
+              "warmTaskHash": "24af49828d4268dc",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2540,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 10,
+              "artifactSha256": "sha256:824d4572443d1a30e855b134806c1f16d8446437dd80d1f700a67a15981dc87b",
+              "coldDurationMs": 2520.759678,
+              "warmDurationMs": 102.010559,
+              "coldTaskHash": "435e07e5abb4590c",
+              "warmTaskHash": "435e07e5abb4590c",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2397,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 11,
+              "artifactSha256": "sha256:04bd38f50b05edf4b5f35cefbeecdd4c1e52fcfe26135f32cecf201f8ad1a9b8",
+              "coldDurationMs": 2472.034571,
+              "warmDurationMs": 103.20122,
+              "coldTaskHash": "8036579d735db275",
+              "warmTaskHash": "8036579d735db275",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2359,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            }
+          ]
+        },
+        {
+          "source": "team",
+          "coldMedianMs": 2575.622102,
+          "warmMedianMs": 115.099741,
+          "warmColdRatio": 0.04468813220333206,
+          "passed": true,
+          "samples": [
+            {
+              "index": 1,
+              "artifactSha256": "sha256:61e9967b0f66d5ff655c74eeaa6ec6ebbc4cc0a57edd1988b92ae2cf9e57992a",
+              "coldDurationMs": 2496.092304,
+              "warmDurationMs": 113.96693,
+              "coldTaskHash": "922a70cbc22b31f8",
+              "warmTaskHash": "922a70cbc22b31f8",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2353,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 2,
+              "artifactSha256": "sha256:2a7ba05e8290ea4ac7959dfe05201726b6a1dd04f3595fe88a779923206deb5a",
+              "coldDurationMs": 2625.749388,
+              "warmDurationMs": 124.827861,
+              "coldTaskHash": "d38319fc364ec298",
+              "warmTaskHash": "d38319fc364ec298",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2457,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 3,
+              "artifactSha256": "sha256:564677ec755db0cf623381cdd48152a390da0fa0d1244563d92c859308c34fb9",
+              "coldDurationMs": 2564.020003,
+              "warmDurationMs": 115.099741,
+              "coldTaskHash": "3092e8170f799bb6",
+              "warmTaskHash": "3092e8170f799bb6",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2419,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 4,
+              "artifactSha256": "sha256:ccbbebc341aedd2d3f4f63c04e98e82b6294a0209cefb88c6b55ddba47a1b1e7",
+              "coldDurationMs": 2574.746761,
+              "warmDurationMs": 133.671757,
+              "coldTaskHash": "4dc5ca65707f1264",
+              "warmTaskHash": "4dc5ca65707f1264",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2424,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 5,
+              "artifactSha256": "sha256:1ddd7ae3d631dcd87af8d0c317624c5ce883dbcaa4d47d19bc8d48b015eccf7a",
+              "coldDurationMs": 2664.114929,
+              "warmDurationMs": 127.433088,
+              "coldTaskHash": "e5112bf1664dc426",
+              "warmTaskHash": "e5112bf1664dc426",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2478,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 6,
+              "artifactSha256": "sha256:a3dd2aa4ec9e24ec8e54d04d7f6e03422dcd32ce2a8db6f45497966814a90177",
+              "coldDurationMs": 2601.458767,
+              "warmDurationMs": 128.508147,
+              "coldTaskHash": "2a5c6c472e3b760e",
+              "warmTaskHash": "2a5c6c472e3b760e",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2419,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 7,
+              "artifactSha256": "sha256:a5e58d26fb4682bbbc35b9d790f4b667921fdd670f9f461565f265ba5412b30c",
+              "coldDurationMs": 2575.622102,
+              "warmDurationMs": 113.2638,
+              "coldTaskHash": "7e1b8531e73f5331",
+              "warmTaskHash": "7e1b8531e73f5331",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2426,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 8,
+              "artifactSha256": "sha256:855c75c28e352505cc52eff8bd498bf057b353fdda79460e71a59370cddbfbfa",
+              "coldDurationMs": 2612.384816,
+              "warmDurationMs": 109.593856,
+              "coldTaskHash": "1cf948bc49eb6d8e",
+              "warmTaskHash": "1cf948bc49eb6d8e",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2455,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 9,
+              "artifactSha256": "sha256:e044b5680ca4aa82c9100c1ff561724047c7775b0647eaed38d5aadbb7a17f90",
+              "coldDurationMs": 2699.604088,
+              "warmDurationMs": 116.05215,
+              "coldTaskHash": "887dc6f76f03e453",
+              "warmTaskHash": "887dc6f76f03e453",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2545,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 10,
+              "artifactSha256": "sha256:9a1e2b91ddd3afa863fa5619dc74f4c4e1d21dd0f25aca7a12af4c52050f69f3",
+              "coldDurationMs": 2470.296946,
+              "warmDurationMs": 103.101592,
+              "coldTaskHash": "7cedf62df8017620",
+              "warmTaskHash": "7cedf62df8017620",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2319,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 11,
+              "artifactSha256": "sha256:49aa71924c715658c6652e0e43f57c180b20b6071a4b5f949181e10b5e6e8a2f",
+              "coldDurationMs": 2335.096977,
+              "warmDurationMs": 105.564776,
+              "coldTaskHash": "9f9000d4711f6cf6",
+              "warmTaskHash": "9f9000d4711f6cf6",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2188,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schemaVersion": "layercache.performance.v1",
+      "binarySha256": "sha256:4ea763dee949d8209770869d335680ddb87f2fc9d058415684dd0c7d6f75c26f",
+      "platform": "linux/amd64",
+      "turboVersion": "2.10.12",
+      "nodeVersion": "v24.13.0",
+      "pbkdf2Iterations": 13708771,
+      "calibration": {
+        "method": "process.cpuUsage",
+        "probeIterations": 250000,
+        "probe": {
+          "userCpuUs": 36382,
+          "systemCpuUs": 91,
+          "wallMs": 36.517682
+        },
+        "targetCpuMs": 2000,
+        "iterations": 13708771
+      },
+      "startedAt": "2026-09-12T08:48:35.29324626Z",
+      "finishedAt": "2026-09-12T08:49:34.758403184Z",
+      "passed": true,
+      "error": null,
+      "sources": [
+        {
+          "source": "local",
+          "coldMedianMs": 2491.392759,
+          "warmMedianMs": 82.38261,
+          "warmColdRatio": 0.03306688987611367,
+          "passed": true,
+          "samples": [
+            {
+              "index": 1,
+              "artifactSha256": "sha256:a8872eca5707aa15f5078fb6e26bc2ba3e25b8d22a5b1e77e7fb4f0ba865c2d1",
+              "coldDurationMs": 2703.441701,
+              "warmDurationMs": 89.311211,
+              "coldTaskHash": "58ab375c66c55f0e",
+              "warmTaskHash": "58ab375c66c55f0e",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2600,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 2,
+              "artifactSha256": "sha256:18da2a2aac03d91b7bde96c73d0d1ffc19d3daa38cfbb7384be59526005c1732",
+              "coldDurationMs": 2732.167576,
+              "warmDurationMs": 89.629287,
+              "coldTaskHash": "2f012df83fdda11a",
+              "warmTaskHash": "2f012df83fdda11a",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2627,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 3,
+              "artifactSha256": "sha256:347266e54a3b6f004f6a0c262dd551c29f17b62fd753c7723a932bf5cd1e60b1",
+              "coldDurationMs": 2499.170887,
+              "warmDurationMs": 78.819027,
+              "coldTaskHash": "86eed37123f86af3",
+              "warmTaskHash": "86eed37123f86af3",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2398,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 4,
+              "artifactSha256": "sha256:0468d70fc91ebbf3554720cac30b5c24e68f9da999f315aeae2d0d207213ce73",
+              "coldDurationMs": 2432.484602,
+              "warmDurationMs": 89.556326,
+              "coldTaskHash": "f6f23f00e3f94120",
+              "warmTaskHash": "f6f23f00e3f94120",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2336,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 5,
+              "artifactSha256": "sha256:64d27c48e2e957549c3fe6a27e631fd0a00a4dba8098e58e1b02e440b6649372",
+              "coldDurationMs": 2521.531355,
+              "warmDurationMs": 81.247789,
+              "coldTaskHash": "41c67a694ad50752",
+              "warmTaskHash": "41c67a694ad50752",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2431,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 6,
+              "artifactSha256": "sha256:96ebbeb2feeec1059699043c2b0fd5ddbc1e97b96d80769ba1df46a2e514acd1",
+              "coldDurationMs": 2536.075298,
+              "warmDurationMs": 81.369722,
+              "coldTaskHash": "1fb4bb6826590277",
+              "warmTaskHash": "1fb4bb6826590277",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2446,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 7,
+              "artifactSha256": "sha256:bfa79e9bdb1a1927241b3ee4e598179a059a61baef9da65544851e8a928100e9",
+              "coldDurationMs": 2424.881639,
+              "warmDurationMs": 82.38261,
+              "coldTaskHash": "73765c91790816f5",
+              "warmTaskHash": "73765c91790816f5",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2334,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 8,
+              "artifactSha256": "sha256:5f4164344787d175c920f9418e24df53991e2f8e2eb60c7b0e82b72c14b474d2",
+              "coldDurationMs": 2390.743996,
+              "warmDurationMs": 80.713731,
+              "coldTaskHash": "c4aa376fd710514d",
+              "warmTaskHash": "c4aa376fd710514d",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2302,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 9,
+              "artifactSha256": "sha256:bad90d79a3c8b18620bb96dccbb0569d5933195f25e70a1112d10aafdca1bbd9",
+              "coldDurationMs": 2391.695719,
+              "warmDurationMs": 81.925632,
+              "coldTaskHash": "22def2b95e3f3ef5",
+              "warmTaskHash": "22def2b95e3f3ef5",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2299,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 10,
+              "artifactSha256": "sha256:2b170ecc17183fa6cfc94a995feb9a9f4889fbf61a40252fc14ba35ce6207432",
+              "coldDurationMs": 2403.765578,
+              "warmDurationMs": 91.249757,
+              "coldTaskHash": "ec3df2d995a268c9",
+              "warmTaskHash": "ec3df2d995a268c9",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2301,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 11,
+              "artifactSha256": "sha256:2797e8d93c10d2eacf4b38d49d12787aae1e0fb5532806f9d864367e0de54829",
+              "coldDurationMs": 2491.392759,
+              "warmDurationMs": 84.106282,
+              "coldTaskHash": "1e7c97e77cb00b89",
+              "warmTaskHash": "1e7c97e77cb00b89",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "localCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2404,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            }
+          ]
+        },
+        {
+          "source": "team",
+          "coldMedianMs": 2487.409801,
+          "warmMedianMs": 103.363483,
+          "warmColdRatio": 0.041554665804744095,
+          "passed": true,
+          "samples": [
+            {
+              "index": 1,
+              "artifactSha256": "sha256:30365779db0a190398dca1626462646fecbcc0a7bac12c488fa3b8bc7f248cf3",
+              "coldDurationMs": 2633.341758,
+              "warmDurationMs": 98.957213,
+              "coldTaskHash": "f12e552d25fef008",
+              "warmTaskHash": "f12e552d25fef008",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2499,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 2,
+              "artifactSha256": "sha256:902db5bab84ec52b1d50312ad90030af1f0373ad27265d1223f160722f9cba20",
+              "coldDurationMs": 2436.120601,
+              "warmDurationMs": 95.834228,
+              "coldTaskHash": "2f0f7b0e9a38dff8",
+              "warmTaskHash": "2f0f7b0e9a38dff8",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2299,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 3,
+              "artifactSha256": "sha256:73c5f1ce0c8d7d5a3352ea4951b1096ee388178ab156694473294ef49f9e1f76",
+              "coldDurationMs": 2487.409801,
+              "warmDurationMs": 105.017471,
+              "coldTaskHash": "efde703c4f237c4c",
+              "warmTaskHash": "efde703c4f237c4c",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2359,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 4,
+              "artifactSha256": "sha256:6ef408dc9d5f2a9d318a65eece3453ed093262ec089463a1e57b776f546ecc4e",
+              "coldDurationMs": 2438.750231,
+              "warmDurationMs": 100.240927,
+              "coldTaskHash": "283175ad18cf9b85",
+              "warmTaskHash": "283175ad18cf9b85",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2311,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 5,
+              "artifactSha256": "sha256:1b336cef789898c61372ac2a85fd3b16972535509781fd9cf5f46cf9ae0c1d10",
+              "coldDurationMs": 2482.455178,
+              "warmDurationMs": 112.060675,
+              "coldTaskHash": "900d8c13134a3b1e",
+              "warmTaskHash": "900d8c13134a3b1e",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2352,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 6,
+              "artifactSha256": "sha256:2a37325207b1af692344fed409926f3bf795bdab8e2135f5aa08bdd701a78079",
+              "coldDurationMs": 2560.007013,
+              "warmDurationMs": 110.55545,
+              "coldTaskHash": "2f6f55a6398c1f9d",
+              "warmTaskHash": "2f6f55a6398c1f9d",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2417,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 7,
+              "artifactSha256": "sha256:6a174030073a842cab838570960200ee401cf633f17cb6c8bce00c66fb904fb2",
+              "coldDurationMs": 2662.038239,
+              "warmDurationMs": 103.78009,
+              "coldTaskHash": "b5f80567e25fbbe2",
+              "warmTaskHash": "b5f80567e25fbbe2",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2525,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 8,
+              "artifactSha256": "sha256:569642b07bde59c6abd7bb47a593c80e0e02bb00c5c3159cbe89bf474442506b",
+              "coldDurationMs": 2531.754889,
+              "warmDurationMs": 103.363483,
+              "coldTaskHash": "580b1cf333937fe5",
+              "warmTaskHash": "580b1cf333937fe5",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2401,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 9,
+              "artifactSha256": "sha256:0430677b7a305c76c02ae0d7f9b714cb04aaa955d03c708658d22ed5c5a1c95d",
+              "coldDurationMs": 2638.418668,
+              "warmDurationMs": 117.33866,
+              "coldTaskHash": "f01b05d07a4aa866",
+              "warmTaskHash": "f01b05d07a4aa866",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2473,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 10,
+              "artifactSha256": "sha256:e7816e9e01c7219482a681d691dcd7e148cb56a48230f75d9b690bbb27ab0fb4",
+              "coldDurationMs": 2441.252427,
+              "warmDurationMs": 95.894961,
+              "coldTaskHash": "0739dcbf582fee12",
+              "warmTaskHash": "0739dcbf582fee12",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2307,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            },
+            {
+              "index": 11,
+              "artifactSha256": "sha256:5008b3f49f1f4b6484de45be85838a5725578b6e074684c6b2aa665f64c853f4",
+              "coldDurationMs": 2471.353246,
+              "warmDurationMs": 101.602652,
+              "coldTaskHash": "f40e3fddb7706c01",
+              "warmTaskHash": "f40e3fddb7706c01",
+              "coldResult": "miss",
+              "warmResult": "hit",
+              "warmSource": "teamCache",
+              "warmNativeRemoteHit": true,
+              "netEstimatedBuildTimeSaved": {
+                "milliseconds": 2322,
+                "method": "criticalPath",
+                "confidence": "medium",
+                "known": 1,
+                "total": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

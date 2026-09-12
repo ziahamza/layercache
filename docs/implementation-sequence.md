@@ -27,5 +27,6 @@ The current host provides native Linux amd64 and KVM. Native arm64 execution and
 4. Provision the Team endpoint, TLS, PostgreSQL/S3, OCI registry, backups, membership policy, and Public service identity. Distribute the real public trust key separately from cache responses.
 5. Migrate one trusted main-branch workflow per project. Confirm a cold result and a fresh-checkout hit before removing each job's Vercel Turbo settings. Existing project workflows have not been changed by this implementation.
 6. Collect representative workload histories and compare LRU with impact at equal quotas. Add admission-value comparison and complete restore-cost attribution, then profile large-cache selection before considering an impact default.
+7. Address the two nonblocking review suggestions: share worker-ID validation across persistence backends, and share pure retention alias aggregation. See [the independent review](review-2026-09-12.md).
 
 Apple signing/notarization remains an optional distribution step. Windows, Xcode, npm mirrors, and new cache adapters remain outside this release sequence.

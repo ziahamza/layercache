@@ -145,3 +145,30 @@ The full `go test ./... -count=1` and `go test -race ./... -count=1` suites pass
 The first attempt to run the installed setup test started before its candidate binary had finished compiling and failed with a missing-file error. After compilation completed, the test ran without skips and passed. That was a QA command-ordering error, not an installer fallback.
 
 Full Go logs and candidate binaries remain at `/tmp/layercache-sequence-final.J8XmmKr5`. These checks do not claim native Linux ARM64 or macOS execution. The remaining release/deployment work is listed in [the implementation sequence](../docs/implementation-sequence.md).
+
+### Final committed source and calibration follow-up
+
+The committed `f8861c6` Actions KVM program ran twice more, at 10.267 and 9.778 seconds. Both runs reproduced the exact previous 158-byte artifact, native key, and payload. The composite builder-image digest was `sha256:84a58ed19ce3bbb5bdbdd099d38abe4f91ef97bd05ff3d58ed8aedd9e7067e1e`. Source hashes were checked after execution. [The final Actions receipt](evidence/2026-09-12-final-actions-kvm.json) records both runs. Full evidence remains at `/tmp/layercache-final-actions-evidence-20260912`. The temporary assets and cgroup were removed.
+
+The earlier Actions source fingerprint differed only because the program gained the ARM64-specific runner label and a test for it after the original trial. An inverse transform reproduced the exact earlier source hashes. The amd64 workflow itself was unchanged; the extra committed-source execution removes that evidence ambiguity.
+
+The deployment check also uncovered a real CLI credential leak: an unspecified bind address such as `0.0.0.0` could send a local administrator request through `HTTP_PROXY`. A fresh-process regression reproduced it. Local control requests now normalize wildcard addresses to loopback and use a proxy-free client. Explicit remote Team/Public URLs retain proxy support. The full CLI suite passed normally and under race after the fix, followed by installed-candidate acceptance and setup tests. [The deployment receipt](evidence/2026-09-12-deployment.json) identifies the tested API image; that image predates the CLI-only proxy correction.
+
+A performance rerun with the corrected product binary first passed current Turbo but failed minimum Turbo at Team sample nine. All completed restores were correct. The cold task fell below the one-second minimum because wall-time calibration had run under heavier shared-host contention and selected too few PBKDF2 iterations. The failed run is preserved in [the follow-up evidence](evidence/2026-09-12-performance-followup.json); it was not discarded or counted as passing.
+
+Calibration now uses measured user plus system CPU consumption from `process.cpuUsage()`. Tests verify that identical consumed CPU yields the same workload despite different elapsed times, reject invalid measurements, and exercise a real Node probe. The probe's CPU and wall measurements are retained in JSON. Neither the one-second minimum nor the 50% warm/cold threshold changed.
+
+Both maintained clients then passed eleven new cold/warm pairs for each source:
+
+| Turbo | Source | Cold median | Warm median | Warm/cold |
+| --- | --- | --- | --- | --- |
+| 2.9.14 | Local Cache | 2,521 ms | 96 ms | 3.8% |
+| 2.9.14 | Team Cache | 2,576 ms | 115 ms | 4.5% |
+| 2.10.12 | Local Cache | 2,491 ms | 82 ms | 3.3% |
+| 2.10.12 | Team Cache | 2,487 ms | 103 ms | 4.2% |
+
+All 44 new pairs proved the expected source and identical restored bytes. The tested product binary digest was `sha256:4ea763dee949d8209770869d335680ddb87f2fc9d058415684dd0c7d6f75c26f`. The follow-up JSON retains individual samples, calibration, and failure evidence. The benchmark's normal/race tests and vet passed after the calibration change.
+
+The final installed-product acceptance suite also passed with both the test driver and the actual CLI binary built using `-race`, in 179.704 seconds. Its log is `/tmp/layercache-sequence-final.J8XmmKr5/installed-race.log`. This is separate from running a race-instrumented driver against a normally compiled child process.
+
+The disposable `layercache-sequence-pg` and `layercache-sequence-s3` containers and their synthetic data were removed, as was the initial `layercache-sequence:qa` image. Test recipes can regenerate those datasets. Retained evidence and binaries remain at the paths above; existing projects and shared package/Docker caches were not cleaned.

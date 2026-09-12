@@ -1,0 +1,98 @@
+{
+  "passed": true,
+  "image": "sha256:a70628e25e30f28808f69e423fb85a06c60aad218a01fffbaf6cacec7c0ed854",
+  "user": "65532:65532",
+  "readonlyRootfs": true,
+  "readonlyConfiguration": true,
+  "droppedCapabilities": [
+    "ALL"
+  ],
+  "initialQuota": {
+    "project": "github.com/acme/deployment-qa-gvbta",
+    "maxBytes": 1048576,
+    "usedBytes": 50,
+    "metadataMaxBytes": 16777216,
+    "metadataBytes": 2038
+  },
+  "changedQuota": {
+    "project": "github.com/acme/deployment-qa-gvbta",
+    "maxBytes": 64,
+    "usedBytes": 50,
+    "metadataMaxBytes": 16777216,
+    "metadataBytes": 2038
+  },
+  "restartedQuota": {
+    "project": "github.com/acme/deployment-qa-gvbta",
+    "maxBytes": 64,
+    "usedBytes": 50,
+    "metadataMaxBytes": 16777216,
+    "metadataBytes": 2038
+  },
+  "events": [
+    {
+      "method": "GET",
+      "path": "/v1/status",
+      "status": 200
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/cache/quota",
+      "status": 200
+    },
+    {
+      "method": "PUT",
+      "path": "/v8/artifacts/deployment-smoke-1789195674966",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/v8/artifacts/deployment-smoke-1789195674966",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/_layercache/compatibility/linux-amd64-node24-schema1/_apis/artifactcache/caches",
+      "status": 201
+    },
+    {
+      "method": "PATCH",
+      "path": "/_layercache/compatibility/linux-amd64-node24-schema1/_apis/artifactcache/caches/5",
+      "status": 204
+    },
+    {
+      "method": "POST",
+      "path": "/_layercache/compatibility/linux-amd64-node24-schema1/_apis/artifactcache/caches/5",
+      "status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/_layercache/compatibility/linux-amd64-node24-schema1/_apis/artifactcache/cache",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/v1/cache/quota",
+      "status": 200
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/cache/quota",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/v8/artifacts/deployment-smoke-1789195674966",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/_layercache/compatibility/linux-amd64-node24-schema1/_apis/artifactcache/cache",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/v1/cache/quota",
+      "status": 200
+    }
+  ]
+}

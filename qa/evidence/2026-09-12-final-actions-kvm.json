@@ -1,0 +1,69 @@
+{
+  "sourceCommit": "f8861c6",
+  "runs": [
+    {
+      "preflight": {
+        "workerId": "actions-kvm-e2e",
+        "platform": "linux/amd64",
+        "kernelSha256": "sha256:0066409132868538bc0c9076f60131025775d5bbd8617df074d059f91b584918",
+        "rootfsSha256": "sha256:90eaa2f84cbea32f2d47fba22b22c2eeb4b9cecb85c808da7804ebafca4138c6",
+        "contractSha256": "sha256:766ef386869d5a584cdcc25cf786b0cac3e89e350178f75049953a0a5a6c8d9c",
+        "builderImageDigest": "sha256:84a58ed19ce3bbb5bdbdd099d38abe4f91ef97bd05ff3d58ed8aedd9e7067e1e",
+        "protocol": "layercache.public-build/v1",
+        "sandboxUid": 64000,
+        "sandboxGid": 994,
+        "network": "none",
+        "sourceTransport": "immutable ext4 block device, read-only",
+        "outputTransport": "bounded virtio-serial stream to trusted host collector",
+        "dependencyMode": "offline-only; dependencies must be vendored in source or pinned in the immutable image",
+        "maxScratchBytes": 2147483648
+      },
+      "producerDurationMilliseconds": 10267,
+      "collected": {
+        "NativeKey": "sha256:7b9ec1669b73e6d45da5d7321e5b3b88ab5b13d3eb2b88d1e6fd2ffc9f24ff56",
+        "MediaType": "application/vnd.layercache.actions-cache",
+        "ResultFormat": "native-blob",
+        "ResultMediaType": "application/vnd.layercache.actions-cache",
+        "Digest": "sha256:8da396eb2322a3b0a1ec0c2d9909ece843e3377b88af250448f9007b466e8dfe",
+        "SizeBytes": 158
+      },
+      "archiveMembers": {
+        "cache/artifact.txt": "public-cache-payload-from-real-kvm"
+      },
+      "outputDigestVerified": true,
+      "nativeKeyVerified": true
+    },
+    {
+      "preflight": {
+        "workerId": "actions-kvm-e2e",
+        "platform": "linux/amd64",
+        "kernelSha256": "sha256:0066409132868538bc0c9076f60131025775d5bbd8617df074d059f91b584918",
+        "rootfsSha256": "sha256:90eaa2f84cbea32f2d47fba22b22c2eeb4b9cecb85c808da7804ebafca4138c6",
+        "contractSha256": "sha256:766ef386869d5a584cdcc25cf786b0cac3e89e350178f75049953a0a5a6c8d9c",
+        "builderImageDigest": "sha256:84a58ed19ce3bbb5bdbdd099d38abe4f91ef97bd05ff3d58ed8aedd9e7067e1e",
+        "protocol": "layercache.public-build/v1",
+        "sandboxUid": 64000,
+        "sandboxGid": 994,
+        "network": "none",
+        "sourceTransport": "immutable ext4 block device, read-only",
+        "outputTransport": "bounded virtio-serial stream to trusted host collector",
+        "dependencyMode": "offline-only; dependencies must be vendored in source or pinned in the immutable image",
+        "maxScratchBytes": 2147483648
+      },
+      "producerDurationMilliseconds": 9778,
+      "collected": {
+        "NativeKey": "sha256:7b9ec1669b73e6d45da5d7321e5b3b88ab5b13d3eb2b88d1e6fd2ffc9f24ff56",
+        "MediaType": "application/vnd.layercache.actions-cache",
+        "ResultFormat": "native-blob",
+        "ResultMediaType": "application/vnd.layercache.actions-cache",
+        "Digest": "sha256:8da396eb2322a3b0a1ec0c2d9909ece843e3377b88af250448f9007b466e8dfe",
+        "SizeBytes": 158
+      },
+      "archiveMembers": {
+        "cache/artifact.txt": "public-cache-payload-from-real-kvm"
+      },
+      "outputDigestVerified": true,
+      "nativeKeyVerified": true
+    }
+  ]
+}

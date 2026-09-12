@@ -33,6 +33,7 @@ type evidence struct {
 	TurboVersion  string         `json:"turboVersion"`
 	NodeVersion   string         `json:"nodeVersion"`
 	Iterations    int            `json:"pbkdf2Iterations"`
+	Calibration   calibration    `json:"calibration"`
 	Sources       []sourceResult `json:"sources"`
 	Passed        bool           `json:"passed"`
 	Error         string         `json:"error,omitempty"`
@@ -159,10 +160,11 @@ func measure(ctx context.Context, opts options) (result evidence, returnErr erro
 		return result, err
 	}
 	result.NodeVersion = strings.TrimSpace(version)
-	result.Iterations, err = calibrate(ctx, root, opts.target)
+	result.Calibration, err = calibrate(ctx, root, opts.target)
 	if err != nil {
 		return result, err
 	}
+	result.Iterations = result.Calibration.Iterations
 	fmt.Fprintf(os.Stderr, "Calibrated %d PBKDF2 iterations for %s of CPU work; Turbo %s\n", result.Iterations, opts.target, result.TurboVersion)
 	for _, source := range opts.sources {
 		measured, err := measureSource(ctx, root, opts, source, result.Iterations)

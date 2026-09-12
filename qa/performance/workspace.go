@@ -3,13 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"math"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"time"
 )
 
 const fixtureRepository = "https://github.com/layercache/performance-fixture.git"
@@ -23,25 +18,6 @@ mkdirSync(new URL("dist", import.meta.url), { recursive: true });
 writeFileSync(new URL("dist/result.txt", import.meta.url), result.toString("hex") + "\n");
 console.log("executed CPU fixture in " + (performance.now() - started).toFixed(1) + "ms");
 `
-
-func calibrate(ctx context.Context, root string, target time.Duration) (int, error) {
-	// Measure the computation itself, excluding Node startup. The measured
-	// workloads then use a fixed iteration count and deterministic output.
-	script := `const {pbkdf2Sync}=require("node:crypto"); const t=performance.now(); pbkdf2Sync("calibrate","layercache-performance",250000,32,"sha256"); console.log(performance.now()-t);`
-	output, _, err := execute(ctx, root, "node", "-e", script)
-	if err != nil {
-		return 0, err
-	}
-	milliseconds, err := strconv.ParseFloat(strings.TrimSpace(output), 64)
-	if err != nil || milliseconds <= 0 || math.IsNaN(milliseconds) || math.IsInf(milliseconds, 0) {
-		return 0, fmt.Errorf("invalid CPU calibration measurement %q", output)
-	}
-	iterations := math.Ceil(250000 * float64(target.Milliseconds()) / milliseconds)
-	if iterations > math.MaxInt32 {
-		return 0, fmt.Errorf("CPU calibration requires an unsupported iteration count: %.0f", iterations)
-	}
-	return max(250000, int(iterations)), nil
-}
 
 func createTemplate(ctx context.Context, directory string) error {
 	files := map[string]string{
