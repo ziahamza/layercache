@@ -7,10 +7,10 @@ import {scanRegistry} from './registry-scan.ts';
 
 const hex = 'a'.repeat(64);
 const digest = `sha256:${hex}`;
-function fixture(t: TestContext) {
+function fixture(t: TestContext, repository = 'gitenv/build') {
   const root = fs.mkdtempSync(join(tmpdir(), 'registry-scan-'));
   t.after(() => fs.rmSync(root, {recursive: true, force: true}));
-  const repo = join(root, 'repositories/gitenv/build');
+  const repo = join(root, 'repositories', repository);
   const revision = join(repo, '_manifests/revisions/sha256', hex, 'link');
   const tag = join(repo, '_manifests/tags/latest/current/link');
   const blob = join(root, 'blobs/sha256/aa', hex, 'data');
@@ -38,6 +38,12 @@ test('live tagged manifest is scanned and protects its tag', t => {
   const revisions = scanRegistry(f.root);
   assert.equal(revisions.length, 1);
   assert.deepEqual(revisions[0]?.tags, ['latest']);
+});
+
+test('Phone registry data participates in bounded-pool retention', t => {
+  const f = fixture(t, 'phone-app/build');
+  f.write(f.revision, digest); f.write(f.tag, digest); f.write(f.blob, '{}');
+  assert.equal(scanRegistry(f.root)[0]?.repository, 'phone-app/build');
 });
 
 test('live tag without a revision aborts rather than dropping a retained root', t => {
