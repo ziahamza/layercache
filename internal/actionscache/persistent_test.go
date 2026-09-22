@@ -71,7 +71,9 @@ func TestPersistentStorageRetriesTeamPublicationAfterRestart(t *testing.T) {
 	if _, err := actionscache.NewCacheChain(local, team); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	// The publisher retries on a five-second idle poll. An equal test deadline
+	// races that poll under CI load; allow two polls plus scheduling headroom.
+	deadline := time.Now().Add(15 * time.Second)
 	remotePublished := false
 	var remote actionscache.LookupResult
 	for {
@@ -135,7 +137,9 @@ func TestPersistentStoragePinsQueuedTeamArtifactUntilPublicationCompletes(t *tes
 	}
 
 	team.setFail(false)
-	deadline := time.Now().Add(5 * time.Second)
+	// The publisher retries on a five-second idle poll. An equal test deadline
+	// races that poll under CI load; allow two polls plus scheduling headroom.
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		stats, statsErr := local.TeamPublicationStats(ctx)
 		if statsErr != nil {

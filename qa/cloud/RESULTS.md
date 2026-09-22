@@ -29,3 +29,8 @@ errors that could include upstream response bodies.
 These tests do not establish real GitHub authorization, a public HTTPS rollout,
 production storage exhaustion, or native Safari application behavior. The fake
 provider is confined to test fixtures. See README for repeatable commands.
+
+Hosted Linux x64 exposed an existing Actions publication test deadline racing
+the publisher’s five-second retry poll. Its two five-second test deadlines now
+allow two polls plus scheduling headroom, preserving all publication/pinning
+assertions. Five race-enabled repetitions of the persistent-storage suite pass.
