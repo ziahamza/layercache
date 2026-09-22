@@ -6,7 +6,7 @@
   "engines": { "node": ">=24" },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test turbo.test.ts",
+    "test": "node --test *.test.ts",
     "check": "pnpm typecheck && pnpm test"
   },
   "devDependencies": {

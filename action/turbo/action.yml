@@ -12,9 +12,14 @@ inputs:
   ttl-minutes:
     description: Credential lifetime, from 1 to 60 minutes.
     default: '30'
+  working-directory:
+    description: Workspace-relative Turbo root whose .turbo/runs summaries will be reported.
+    default: '.'
 outputs:
   expires-at:
     description: Credential expiration time.
 runs:
   using: node24
   main: main.ts
+  post: post.ts
+  post-if: always()
