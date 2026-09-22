@@ -81,6 +81,7 @@ type Config struct {
 	BuildkitBranch             string            `json:"buildkitBranch,omitempty"`
 	BuildkitGCBytes            int64             `json:"buildkitGcBytes,omitempty"`
 	GitHubCredentialAccount    string            `json:"githubCredentialAccount,omitempty"`
+	GitHubCLIPath              string            `json:"githubCliPath,omitempty"`
 	GitHubAPIURL               string            `json:"githubApiUrl,omitempty"`
 	GitHubOIDCIssuer           string            `json:"githubOidcIssuer,omitempty"`
 	TeamMembers                map[string]string `json:"teamMembers,omitempty"`

@@ -38,13 +38,14 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", defaultPath, "configuration file")
 	clientID := flags.String("github-client-id", os.Getenv("LAYERCACHE_GITHUB_CLIENT_ID"), "GitHub OAuth app client ID")
+	githubCLI := flags.Bool("github-cli", false, "use the existing GitHub CLI login without copying its credential")
 	deviceEndpoint := flags.String("github-device-endpoint", githubauth.DefaultDeviceEndpoint, "GitHub device authorization endpoint")
 	tokenEndpoint := flags.String("github-token-endpoint", githubauth.DefaultTokenEndpoint, "GitHub access-token endpoint")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*clientID) == "" {
+	if !*githubCLI && strings.TrimSpace(*clientID) == "" {
 		return errors.New("--github-client-id or LAYERCACHE_GITHUB_CLIENT_ID is required")
 	}
 	cfg, err := config.Load(*configPath)
@@ -56,6 +57,9 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	}
 	if cfg.TeamURL == "" {
 		return errors.New("configure --team-url before logging in")
+	}
+	if *githubCLI {
+		return loginWithGitHubCLI(ctx, *configPath, cfg, *jsonOutput, stdout, stderr)
 	}
 	client := githubauth.DeviceClient{
 		ClientID:       *clientID,
@@ -113,6 +117,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return cleanupFailedLogin(ctx, account, err)
 	}
 	cfg.GitHubCredentialAccount = account
+	cfg.GitHubCLIPath = ""
 	cfg.TeamToken = exchanged.TeamToken
 	cfg.TeamTokenExpiresAt = exchanged.ExpiresAt
 	if exchanged.PublicAccessToken != "" {
@@ -208,8 +213,7 @@ func exchangeGitHubCapabilityAt(ctx context.Context, baseURL string, cfg config.
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(io.LimitReader(response.Body, 16<<10))
-		return capabilityExchange{}, fmt.Errorf("project capability exchange returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
+		return capabilityExchange{}, fmt.Errorf("project capability exchange returned HTTP %d", response.StatusCode)
 	}
 	var exchanged capabilityExchange
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&exchanged); err != nil {
@@ -222,11 +226,14 @@ func exchangeGitHubCapabilityAt(ctx context.Context, baseURL string, cfg config.
 }
 
 func refreshTeamCapability(ctx context.Context, cfg *config.Config) error {
-	if cfg.TeamURL == "" || cfg.GitHubCredentialAccount == "" {
+	if cfg.TeamURL == "" || cfg.GitHubCredentialAccount == "" && cfg.GitHubCLIPath == "" {
 		return nil
 	}
 	if cfg.TeamToken != "" && cfg.TeamTokenExpiresAt.After(time.Now().Add(5*time.Minute)) {
 		return nil
+	}
+	if cfg.GitHubCLIPath != "" {
+		return refreshGitHubCLICapability(ctx, cfg)
 	}
 	encoded, err := (credentials.Store{}).Get(ctx, cfg.GitHubCredentialAccount)
 	if err != nil {
@@ -309,6 +316,7 @@ func persistRefreshedCapabilities(
 func sameCredentialScope(left, right config.Config) bool {
 	return left.InstallationID == right.InstallationID &&
 		left.GitHubCredentialAccount == right.GitHubCredentialAccount &&
+		left.GitHubCLIPath == right.GitHubCLIPath &&
 		left.TeamURL == right.TeamURL &&
 		left.PublicURL == right.PublicURL &&
 		left.ProjectID == right.ProjectID &&

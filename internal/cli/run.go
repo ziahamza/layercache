@@ -246,7 +246,7 @@ func maintainTeamCapability(
 }
 
 func nextCapabilityRefresh(cfg config.Config, now time.Time) (time.Duration, bool) {
-	if cfg.TeamURL == "" || cfg.GitHubCredentialAccount == "" {
+	if cfg.TeamURL == "" || cfg.GitHubCredentialAccount == "" && cfg.GitHubCLIPath == "" {
 		return 0, false
 	}
 	expiresAt := cfg.TeamTokenExpiresAt
@@ -567,6 +567,9 @@ func runSetup(ctx context.Context, args []string, stdout, stderr io.Writer) (ret
 		base.PublicAccessTokenExpiresAt = time.Time{}
 	}
 	credentialAccountToDelete := ""
+	if original.TeamURL != base.TeamURL || original.PublicURL != base.PublicURL || original.ProjectID != base.ProjectID {
+		base.GitHubCLIPath = ""
+	}
 	if original.GitHubCredentialAccount != "" &&
 		(original.TeamURL != base.TeamURL || original.PublicURL != base.PublicURL || original.ProjectID != base.ProjectID) {
 		credentialAccountToDelete = original.GitHubCredentialAccount
