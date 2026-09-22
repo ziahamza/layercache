@@ -35,7 +35,10 @@ func postTurboReport(t *testing.T, instance *Server, claims access.Claims, body 
 	request := httptest.NewRequest(http.MethodPost, "/v1/reports/turbo", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+token)
 	response := httptest.NewRecorder()
-	instance.Handler().ServeHTTP(response, request)
+	// Action posts contain only a signed bearer token, not a project header.
+	// Exercise the production gateway's untrusted-hint routing then verification.
+	gateway := &ProjectGateway{projects: map[string]*Server{instance.config.ProjectID: instance}}
+	gateway.ServeHTTP(response, request)
 	return response
 }
 func reportSummary(t *testing.T, id, status string, now time.Time) []byte {
@@ -104,7 +107,11 @@ func TestTurboReportEndpointScopesJobsAndRejectsForgedAuthority(t *testing.T) {
 			invalid := claims
 			mutate(&invalid)
 			response := postTurboReport(t, instance, invalid, reportSummary(t, "invalid", "MISS", now))
-			if response.Code != 401 {
+			wantStatus := 401
+			if name == "project" {
+				wantStatus = 404
+			}
+			if response.Code != wantStatus {
 				t.Fatalf("status=%d", response.Code)
 			}
 		})
