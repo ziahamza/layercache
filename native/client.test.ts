@@ -2,11 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile, chmod, utimes } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile, chmod, utimes, copyFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NativeCache, artifactKey } from './client.ts';
 import provider, { identityForBuild } from './expo.ts';
+import { detectSimulatorTarget, validateSimulatorApp } from './expo-identity.ts';
 
 const identity = { project: 'github.com/example/app', compatibility: 'xcode26-iossim-arm64-debug', key: 'sources-123' };
 async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
@@ -145,6 +146,18 @@ test('invalid config and oversized builds are rejected', async t => {
 
 test('Expo provider reuses Debug clients across worktrees but refuses Release fingerprint reuse', async t => {
   const { root, app } = await fixture(t);
+  await mkdir(join(root, 'worktree-one'));
+  await mkdir(join(root, 'worktree-two'));
+  if (process.platform === 'darwin') {
+    // A real Mach-O makes the provider's macOS architecture validation run;
+    // this transport fixture does not claim to be a launchable simulator app.
+    // Apple's system tools can use arm64e rather than the runner's arm64 ABI.
+    // The running Node executable necessarily supports this process architecture.
+    await copyFile(process.execPath, join(app, 'SimulatorFixture'));
+    await writeFile(join(app, 'Info.plist'), '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>SimulatorFixture</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>');
+    // Keep fixture failures visible instead of swallowing them through fail-open.
+    await validateSimulatorApp(app, await detectSimulatorTarget(root));
+  }
   const options = { project: identity.project, compatibility: identity.compatibility, app: 'mobile', cacheDir: join(root, 'cache') };
   const props = { projectRoot: join(root, 'worktree-one'), platform: 'ios' as const, fingerprintHash: 'a'.repeat(40), runOptions: {} };
   assert.ok(await provider.uploadBuildCache({ ...props, buildPath: app }, options));

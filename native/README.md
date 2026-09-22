@@ -38,8 +38,10 @@ By default the provider detects Xcode/SDK build versions and the host architectu
 For Android it detects Java and the connected target's ABIs. Expo's fingerprint
 also covers the native source/dependencies/configuration. If detection fails, Expo
 builds normally. To align a Linux CI planner with a declared target, set an explicit
-`compatibility` option and verify that toolchain on the build runner. Never use
-one explicit compatibility value for different toolchains or target ABIs.
+target using the shared Expo mode below. The default provider detects that same
+identity locally; no compatibility override is needed. Legacy explicit
+`compatibility` overrides remain supported, but must equal the planner's output
+for shared hits. Never use one value for different toolchains or target ABIs.
 
 Keep short-lived project credentials in `LAYER_CACHE_TOKEN`, never app config.
 The provider also accepts paired `TURBO_API`/`TURBO_TOKEN` from Layer Cache setup. Without credentials
@@ -80,6 +82,72 @@ a hit. Keep downstream artifact publication working on both hit and miss paths.
 
 Pin and check the toolchain on the build runner. A floating `macos-latest` label
 does not prove that the binary matches the compatibility declared by Linux.
+
+### Shared Expo development-client keys
+
+Source mode remains the default and does **not** match Expo provider keys.
+For iOS Debug simulator clients, use `key-mode: expo` after installing the app's
+locked dependencies. Both the action and provider use the **app's installed**
+`@expo/fingerprint` (including Expo CLI's pnpm-nested copy), with identical
+options. No fingerprint implementation is downloaded at runtime.
+The planner also uses the installed Expo environment loader, defaults `NODE_ENV`
+and `BABEL_ENV` the same way as `expo run:ios`, and loads the app's `.env` files
+silently. Explicit environment overrides must still match across jobs/worktrees.
+
+On the selected Mac toolchain, `pnpm exec layercache-native expo-target` emits
+JSON containing `os`, `arch`, the complete `xcodebuild -version` output as `xcode`,
+and the simulator SDK build as `sdk`. Record this non-secret target as a project
+variable, for example `LAYERCACHE_IOS_TARGET`. Linux can look up this identity
+without Xcode. macOS verifies all fields against its actual toolchain before
+restore or save; simulator saves cannot run on Linux.
+
+```yaml
+- uses: ziahamza/layercache/action/native@main
+  id: native
+  env:
+    NODE_ENV: development
+    BABEL_ENV: development
+  with:
+    team-url: https://layer-cache.ziahamza.com
+    key-mode: expo
+    expo-root: apps/mobile
+    expo-app: mobile # exactly the provider options.app
+    expo-target: ${{ vars.LAYERCACHE_IOS_TARGET }}
+```
+
+Use these same inputs on the Mac save step, plus `operation: save`, the validated
+`.app` path, and **both** Linux lookup outputs as `key` and `compatibility`.
+Save recalculates the fingerprint and rejects any mismatch instead of publishing
+under a stale lookup key. Acquire save credentials after compilation (each action
+invocation exchanges fresh OIDC credentials). `expo-scheme` must match the raw
+`--scheme` passed to Expo, not the app's URL scheme. Omit it on both sides when
+using Expo's default scheme. Never publish Release output under this mode.
+
+For a local/CI planner outside the action:
+
+```sh
+NODE_ENV=development BABEL_ENV=development pnpm exec layercache-native expo-key \
+  --root apps/mobile --project github.com/your-team/your-app --app mobile \
+  --target '{"os":"darwin","arch":"arm64","xcode":"Xcode 26.0\nBuild version YOUR_BUILD","sdk":"YOUR_SDK_BUILD"}'
+```
+
+On macOS `--target` may be omitted to detect the active toolchain. The output is
+JSON `{project, compatibility, key}`, not credentials. The action/provider reject
+simulator artifacts with the wrong platform or executable architecture and reject
+embedded `main.jsbundle` files. These checks are not a build-provenance attestation:
+the trusted producer must compile Debug, validate installation/launch on a simulator,
+and verify current JavaScript loads through Metro before publication. Pass Expo
+`--no-build-cache` for that initial qualification build; the provider honors it for
+both restore and upload, so publication can happen only after validation.
+
+Cross-OS equality is **not assumed**. Pin the same dependencies, build-affecting
+environment and Expo configuration on Linux, Mac and local worktrees. Expo's own
+fingerprint rules determine whether generated native directories are excluded;
+tracked native code is not blindly ignored. Qualify the fingerprint before and
+after prebuild/CocoaPods, then verify a fresh Linux lookup and a matching Mac
+worktree restore. A mismatch safely builds normally, but cannot demonstrate a
+skipped Mac runner. Real simulator/Metro qualification remains a project rollout
+gate; the transport and identity tests alone do not prove it.
 
 ## Local native artifacts and fresh worktrees
 

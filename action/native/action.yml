@@ -10,8 +10,19 @@ inputs:
   project:
     description: Project identity, defaults to github.com/owner/repo.
   compatibility:
-    description: Explicit target Xcode/SDK/architecture/configuration identity, identical on lookup and build jobs.
-    required: true
+    description: Required in source mode. In Expo mode calculated from expo-target; an explicit value must match.
+  key-mode:
+    description: source (default) or expo (shared Expo iOS Debug simulator identity).
+    default: source
+  expo-root:
+    description: Installed Expo app directory relative to workspace. Required dependencies must already be installed.
+    default: '.'
+  expo-app:
+    description: App identity matching the Expo provider options.app; required in Expo mode.
+  expo-scheme:
+    description: Exact scheme passed to expo run ios. Omit on both CI and local builds for the Expo default.
+  expo-target:
+    description: JSON target with os=darwin, arch=arm64 or x64, exact xcodebuild -version output, and iphonesimulator SDK build as sdk. Verified on macOS; required in Expo mode.
   key:
     description: Build identity. Defaults to all Git source names/modes/contents, including dirty files. Supply build-affecting environment through compatibility.
   path:
@@ -20,6 +31,8 @@ inputs:
     description: Maximum local archive cache bytes.
     default: '5368709120'
 outputs:
+  compatibility:
+    description: Resolved compatibility identity; pass it alongside key from Linux lookup to macOS save to reject mismatches.
   key:
     description: Resolved source key. Pass this from the Linux lookup job to the build job save step.
   cache-hit:
