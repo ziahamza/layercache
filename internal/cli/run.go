@@ -37,6 +37,7 @@ Usage:
   layercache stop [options]
   layercache status [options]
   layercache doctor [options]
+  layercache dashboard [--config FILE ...] [--listen 127.0.0.1:PORT]
   layercache repair [options]
   layercache gc [options]
   layercache cache quota|pins|pin|unpin [options]
@@ -69,6 +70,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return errors.New("a command is required")
 	}
 	switch args[0] {
+	case "dashboard":
+		return runDashboard(ctx, args[1:], stdout, stderr)
 	case "setup":
 		return runSetup(ctx, args[1:], stdout, stderr)
 	case "login":

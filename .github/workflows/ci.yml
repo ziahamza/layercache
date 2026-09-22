@@ -39,11 +39,41 @@ jobs:
           go build -o "$RUNNER_TEMP/layercache-native-test" ./cmd/layercache
           LAYERCACHE_SETUP_BINARY="$RUNNER_TEMP/layercache-native-test" pnpm test
       - name: Verify shipped JavaScript matches TypeScript
-        run: git diff --exit-code -- native/dist action/native/dist
+        run: git diff --exit-code -- native/dist action/native/dist internal/dashboard/assets/app.js
 
   performance:
     name: Cache performance
     uses: ./.github/workflows/performance.yml
+
+  dashboard:
+    name: Dashboard / ${{ matrix.browser }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.13.0'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.25.13'
+          cache: false
+      - run: npm install --global pnpm@10.34.5
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps "${{ matrix.browser }}"
+      - run: pnpm typecheck && pnpm build
+      - name: Build dashboard candidate
+        run: go build -o "$RUNNER_TEMP/layercache-dashboard" ./cmd/layercache
+      - name: Exercise real cache connections and browser failures
+        env:
+          LAYERCACHE_BIN: ${{ runner.temp }}/layercache-dashboard
+          DASHBOARD_BROWSER: ${{ matrix.browser }}
+          QA_OUTPUT: ${{ runner.temp }}/dashboard-browser-results
+        run: pnpm test:dashboard
 
   lint:
     name: Workflow and shell checks

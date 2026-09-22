@@ -86,6 +86,18 @@ bin/layercache repair --json
 bin/layercache stop --json
 ```
 
+Open a live dashboard for existing CLI project connections:
+
+```bash
+bin/layercache dashboard --config /path/to/project.json
+# Repeat --config to view multiple projects.
+```
+
+The [CLI-connected dashboard](docs/dashboard.md) shows Local Cache and Team Cache
+health, artifact storage, and reuse reports. Open the complete URL printed by the
+CLI and keep the process running. Hosted self-serve teams, machine enrollment,
+and cloud runners are subsequent slices.
+
 `doctor` is read-only. `repair` recreates missing owned data directories and reconstructs runtime ownership only from the authenticated live daemon identity; it never trusts a PID alone. `gc` requires a running daemon. Uninstall makes the cache choice explicit:
 
 ```bash

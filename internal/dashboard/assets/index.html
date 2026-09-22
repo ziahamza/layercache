@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Layer Cache · Projects</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<aside><a class="brand" href="#projects"><span class="mark">▱</span> Layer Cache</a><div class="workspace"><span class="avatar">LC</span><div>CLI workspace<small>Connected projects</small></div></div><p class="nav-label">WORKSPACE</p><div class="nav-active">▦ <span>Projects</span></div><div class="sidebar-bottom"><span class="dot"></span> CLI connection <small>Local dashboard session</small></div></aside>
+<main><header><span>Workspace <span class="slash">/</span> Projects</span><span class="session">CLI connected</span></header>
+<section class="content"><div class="heading"><div><p class="eyebrow">BUILD ONCE. REUSE EVERYWHERE.</p><h1>Your team's build cache.</h1><p class="subtitle">See what's connected, what's being reused, and where your cache lives.</p></div><button id="connect" class="primary">+ Connect a project</button></div>
+<div class="toolbar"><div class="view-label">All projects <span id="count">—</span></div><div class="controls"><label for="period" class="sr-only">Report period</label><select id="period"><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option></select><button id="refresh">↻ Refresh</button></div></div>
+<p id="notice" role="status" aria-live="polite">Connecting to your CLI…</p><div id="projects"></div>
+<div class="footnote"><span class="dot"></span><span id="updated">Waiting for a snapshot</span><span>Usage is current · Reports cover the selected period</span></div>
+<div class="next"><div class="next-icon">↗</div><div><h2>From your machine to your team.</h2><p>Start with Local Cache. Connect Team Cache to share build artifacts across engineers and CI.</p></div><span class="pill">CLI → Team Cache</span></div>
+</section></main>
+<dialog id="onboarding" aria-labelledby="onboarding-title"><form method="dialog"><button class="close" aria-label="Close">×</button></form><p class="eyebrow">CONNECT YOUR WORK</p><h2 id="onboarding-title">Add an existing project</h2><p>Use a local Layer Cache configuration for each project. To connect its Team Cache, configure your team's endpoint and sign in:</p><pre>layercache setup \
+  --config /path/to/project.json \
+  --project github.com/your-team/your-project \
+  --team-url https://your-team-cache.example.com \
+  --non-interactive
+
+layercache login --github-cli --config /path/to/project.json
+layercache start --config /path/to/project.json</pre><p>Restart the dashboard with one configuration per project:</p><pre>layercache dashboard \
+  --config /path/to/first-project.json \
+  --config /path/to/second-project.json</pre><p class="subtle">A team administrator must provision the Team Cache and grant project access. Self-serve team creation and cloud runners are not available in this slice.</p></dialog>
+</body></html>
