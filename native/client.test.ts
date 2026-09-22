@@ -5,6 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile, chmod, utimes, copyFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { NativeCache, artifactKey } from './client.ts';
 import provider, { identityForBuild } from './expo.ts';
 import { detectSimulatorTarget, validateSimulatorApp } from './expo-identity.ts';
@@ -39,6 +40,59 @@ test('project, compatibility and source key each isolate artifacts', async t => 
     assert.notEqual(artifactKey(changed), artifactKey(identity));
     assert.equal((await cache.restore(changed)).hit, false);
   }
+});
+
+test('Expo repeated hits share a process-pinned extraction instead of accumulating worktree copies', async t => {
+  const { root } = await fixture(t);
+  const apk = join(root, 'Client.apk');
+  await writeFile(apk, 'android development binary');
+  const options = { project: identity.project, compatibility: 'android-test', app: 'mobile', cacheDir: join(root, 'cache') };
+  const props = { projectRoot: join(root, 'worktree'), platform: 'android' as const, fingerprintHash: 'a'.repeat(40), runOptions: {} };
+  assert.ok(await provider.uploadBuildCache({ ...props, buildPath: apk }, options));
+  const first = await provider.resolveBuildCache(props, options);
+  const second = await provider.resolveBuildCache(props, options);
+  assert.ok(first);
+  assert.equal(second, first);
+  assert.ok(first.startsWith(options.cacheDir));
+});
+
+test('managed extraction admission includes expanded bytes and preserves live consumers under pressure', async t => {
+  const { root } = await fixture(t);
+  const apk = join(root, 'Client.apk');
+  await writeFile(apk, Buffer.alloc(200_000, 1));
+  const options = { project: identity.project, compatibility: 'android-test', app: 'mobile', cacheDir: join(root, 'cache'), maxBytes: 300_000 };
+  const props = { projectRoot: root, platform: 'android' as const, fingerprintHash: 'a'.repeat(40), runOptions: {} };
+  const other = { ...props, fingerprintHash: 'b'.repeat(40) };
+  assert.ok(await provider.uploadBuildCache({ ...props, buildPath: apk }, options));
+  assert.ok(await provider.uploadBuildCache({ ...other, buildPath: apk }, options));
+  const first = await provider.resolveBuildCache(props, options);
+  assert.ok(first);
+  assert.equal(await provider.resolveBuildCache(other, options), null);
+  assert.equal((await readFile(first)).length, 200_000);
+  assert.equal(await provider.resolveBuildCache(props, options), first);
+});
+
+test('dead process extractions are reclaimed while current process paths remain pinned', async t => {
+  const { cache, app } = await fixture(t);
+  await cache.save(identity, app);
+  const code = `import { NativeCache } from './native/client.ts'; const r = await new NativeCache(${JSON.stringify({ cacheDir: cache.root })}).restoreManaged(${JSON.stringify(identity)}); console.log(r.path);`;
+  const deadPath = execFileSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' }).trim();
+  assert.ok((await stat(deadPath)).isDirectory());
+  const [first, second] = await Promise.all([cache.restoreManaged(identity), cache.restoreManaged(identity)]);
+  assert.equal(first.path, second.path);
+  await assert.rejects(stat(deadPath), { code: 'ENOENT' });
+  assert.equal((await readdir(join(cache.root, 'extractions'))).length, 1);
+});
+
+test('managed extraction refuses a symlink root without deleting its target', async t => {
+  const { cache, app, root } = await fixture(t);
+  await cache.save(identity, app);
+  const outside = join(root, 'unrelated');
+  await mkdir(outside);
+  await writeFile(join(outside, 'keep'), 'user file');
+  await symlink(outside, join(cache.root, 'extractions'));
+  await assert.rejects(cache.restoreManaged(identity), /Unsafe native extraction/);
+  assert.equal(await readFile(join(outside, 'keep'), 'utf8'), 'user file');
 });
 
 test('corrupt local archive becomes a miss and is removed', async t => {
