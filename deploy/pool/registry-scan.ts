@@ -24,7 +24,7 @@ export function scanRegistry(root: string): Revision[] {
   const revisions: Revision[] = [];
   function walk(path: string, repository: string) {
     if (fs.existsSync(join(path, '_manifests'))) {
-      if (!/^(gitenv|agent-access|parle|booker)\/[a-zA-Z0-9_./-]+$/.test(repository)) return;
+      if (!/^(gitenv|agent-access|parle|booker|phone-app)\/[a-zA-Z0-9_./-]+$/.test(repository)) return;
       const tags = new Map<string, {names: string[], createdMs: number}>();
       for (const tag of directories(join(path, '_manifests/tags'))) {
         const link = join(path, '_manifests/tags', tag, 'current/link');

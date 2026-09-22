@@ -76,6 +76,7 @@ services:
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/agent-access:/etc/layercache-agent-access:ro
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/parle:/etc/layercache-parle:ro
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/booker:/etc/layercache-booker:ro
+      - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/phone-app:/etc/layercache-phone-app:ro
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/gateway:/etc/layercache-gateway:ro
       - ${LAYER_CACHE_PLATFORM_ROOT:?Set runtime root}/secrets/layercache/registry:/etc/layercache-registry:ro
     tmpfs: ["/tmp:size=67108864,mode=1777"]
