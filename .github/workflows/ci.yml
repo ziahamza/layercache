@@ -214,3 +214,8 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm check
+      - name: Check native TypeScript BuildKit action
+        working-directory: action/buildkit
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm check

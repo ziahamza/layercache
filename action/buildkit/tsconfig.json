@@ -1,0 +1,1 @@
+{"extends":"../turbo/tsconfig.json","include":["*.ts"]}
