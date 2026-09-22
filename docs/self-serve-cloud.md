@@ -38,7 +38,7 @@ Create a GitHub OAuth app with homepage `https://YOUR_HOST`, callback `https://Y
 
 Use a dedicated physically bounded storage filesystem, following the existing [aggregate storage budget](aggregate-cache-budget.md). The mounted pool must contain `.layercache-pool` with `layercache-pool-v1`; its filesystem size cannot exceed `storagePool.maxBytes`. Put the service data directory inside that pool. Do not point a new service at an existing cache's data directory.
 
-Prepare an owner-only template with the CLI:
+Create the service account and configuration directory first. Run the following preparation as the service account (`layercache` in the example unit), with write access to `/etc/layercache-cloud` and the mounted pool. All protected files must be owned by that same account; root-owned files are rejected when the service runs as `layercache`. Prepare an owner-only template with the CLI:
 
 ```sh
 umask 077
