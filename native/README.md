@@ -179,10 +179,13 @@ by that staging bound. Downloaded and expanded sizes are checked independently.
 Expo provider extractions now live in that same cache and share its budget with
 archives and download/staging reservations. Repeated hits in one process reuse
 one extraction per identity and digest, including across worktrees. Expo has no
-release callback, so returned paths stay pinned until the consumer process exits;
+release callback, so returned paths and their backing archives stay pinned until the consumer process exits;
 the next cache operation reclaims dead owners. Live consumers are never evicted:
 insufficient capacity falls back to a normal Expo build. PID reuse conservatively
 retains old entries rather than risking deletion of an active app. Expanded
+artifacts are validated before their paths are handed to Expo; a newly rejected
+extraction releases its reservation without deleting any previously returned path.
+Conflicting saves cannot replace an archive backing a live consumer. Expanded
 reservations include conservative per-entry allocation overhead. This is managed
 payload accounting, not a filesystem quota on arbitrary files or filesystem
 metadata; use the deployment's capped filesystem for a physical hard limit.

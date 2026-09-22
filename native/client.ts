@@ -107,12 +107,13 @@ export class NativeCache {
       return { path, size: info.size, used: info.mtimeMs };
     }));
     const pinned = await new Extractions(join(this.root, 'extractions')).usage();
-    if (pinned + reserve + (entries.find(entry => entry.path === keep)?.size ?? 0) > this.maxBytes) throw new Error('Insufficient local cache budget: live Expo consumers are pinned');
-    let bytes = entries.reduce((total, entry) => total + entry.size, 0) + pinned;
+    const retained = (path: string) => path === keep || pinned.keys.has(basename(path, '.tgz'));
+    if (pinned.bytes + reserve + entries.filter(entry => retained(entry.path)).reduce((total, entry) => total + entry.size, 0) > this.maxBytes) throw new Error('Insufficient local cache budget: live Expo consumers are pinned');
+    let bytes = entries.reduce((total, entry) => total + entry.size, 0) + pinned.bytes;
     const cutoff = Date.now() - (this.options.maxAgeMs ?? 7 * 86400_000);
     for (const entry of entries.sort((a, b) => a.used - b.used)) {
       if (bytes + reserve <= this.maxBytes && entry.used > cutoff) break;
-      if (entry.path === keep) continue;
+      if (retained(entry.path)) continue;
       await rm(entry.path, { force: true });
       await rm(`${entry.path}.sha256`, { force: true });
       bytes -= entry.size;
@@ -135,10 +136,10 @@ export class NativeCache {
   }
   // The provider returns paths still in use by Expo after this method returns.
   // Unlike caller-owned destinations, these bytes remain in the cache budget.
-  async restoreManaged(identity: Identity): Promise<Result> {
-    return this.restoreInternal(identity, undefined, true);
+  async restoreManaged(identity: Identity, validate?: (destination: string) => Promise<void>): Promise<Result> {
+    return this.restoreInternal(identity, undefined, true, validate);
   }
-  private async restoreInternal(identity: Identity, destination?: string, managed = false): Promise<Result> {
+  private async restoreInternal(identity: Identity, destination?: string, managed = false, validate?: (destination: string) => Promise<void>): Promise<Result> {
     const started = performance.now();
     const key = artifactKey(identity);
     return this.locked(async () => {
@@ -179,10 +180,18 @@ export class NativeCache {
       if (managed) {
         const extractions = new Extractions(join(this.root, 'extractions'));
         const entry = extractions.path(key, digest);
-        if (await extractions.existing(entry)) destination = join(entry, 'artifact');
+        if (await extractions.existing(entry)) {
+          destination = join(entry, 'artifact');
+          // A previous caller may still be consuming this path. Revalidation
+          // failure must not remove an extraction already handed to Expo.
+          await validate?.(destination);
+        }
         else {
           await this.evict(expanded, path);
-          destination = await extractions.create(entry, expanded, target => extract(path, target, this.maxBytes));
+          destination = await extractions.create(entry, key, expanded, async target => {
+            await extract(path, target, this.maxBytes);
+            await validate?.(target);
+          });
         }
       } else if (destination) await extract(path, destination, this.maxBytes);
       return { hit: true, source, path: destination ? resolve(destination) : path, digest, bytes: (await stat(path)).size, elapsedMs: performance.now() - started };
@@ -212,6 +221,10 @@ export class NativeCache {
         // Validate link/path/expanded-size rules before publishing anything.
         await inspect(temporary, this.maxBytes);
         const digest = await digestFile(temporary);
+        const pinned = await new Extractions(join(this.root, 'extractions')).usage();
+        if (pinned.keys.has(key) && await digestFile(path) !== digest) {
+          throw new Error('Cannot replace native artifact backing live Expo consumers; use a complete build key');
+        }
         await rename(temporary, path);
         await writeFile(`${path}.sha256`, digest, { mode: 0o600 });
         const url = this.url(identity);
@@ -296,7 +309,7 @@ async function inspect(archive: string, maxBytes: number): Promise<number> {
   // Include conservative per-entry allocation/metadata overhead, even for many
   // empty files. Admission happens before extraction; staging uses this same
   // directory and reservation, never a second unaccounted copy.
-  return expandedBytes + (count + 3) * 4096;
+  return expandedBytes + (count + 4) * 4096;
 }
 async function extract(archive: string, destination: string, maxBytes: number): Promise<void> {
   const target = resolve(destination);

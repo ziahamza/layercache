@@ -12,10 +12,11 @@ export class Extractions {
   path(key: string, digest: string): string {
     return join(this.root, `${owner}-${createHash('sha256').update(key + digest).digest('hex')}`);
   }
-  async usage(): Promise<number> {
+  async usage(): Promise<{ bytes: number; keys: Set<string> }> {
+    const keys = new Set<string>();
     let info;
     try { info = await lstat(this.root); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { bytes: 0, keys }; throw error; }
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe native extraction directory');
     let total = 0;
     for (const name of await readdir(this.root)) {
@@ -32,19 +33,23 @@ export class Extractions {
       if (!(await lstat(marker)).isFile()) throw new Error('Unsafe native extraction reservation');
       const reserved = Number(await readFile(marker, 'utf8'));
       if (!Number.isSafeInteger(reserved) || reserved <= 0) throw new Error('Invalid native extraction reservation');
+      const key = await readFile(join(path, 'key'), 'utf8');
+      if (!/^native-v1-[a-f0-9]{64}$/.test(key)) throw new Error('Invalid native extraction key');
+      keys.add(key);
       total += reserved;
     }
-    return total;
+    return { bytes: total, keys };
   }
   async existing(path: string): Promise<boolean> {
     try { return (await lstat(join(path, 'artifact'))).isDirectory(); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
   }
-  async create(path: string, reservation: number, extract: (destination: string) => Promise<void>): Promise<string> {
+  async create(path: string, key: string, reservation: number, extract: (destination: string) => Promise<void>): Promise<string> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     await mkdir(path, { mode: 0o700 });
     try {
       await writeFile(join(path, 'reservation'), String(reservation), { flag: 'wx', mode: 0o600 });
+      await writeFile(join(path, 'key'), key, { flag: 'wx', mode: 0o600 });
       await extract(join(path, 'artifact'));
       return join(path, 'artifact');
     } catch (error) { await rm(path, { recursive: true, force: true }); throw error; }

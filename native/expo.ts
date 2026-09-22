@@ -45,15 +45,17 @@ const provider = {
     if (props.runOptions.buildCache === false) return null;
     try {
       const resolved = await withToolchain(props, options);
-      const result = await client(resolved).restoreManaged(identityForBuild(props, resolved));
+      let name: string | undefined;
+      const result = await client(resolved).restoreManaged(identityForBuild(props, resolved), async destination => {
+        const names = await readdir(destination);
+        name = names[0];
+        if (names.length !== 1 || !name || !name.endsWith(props.platform === 'ios' ? '.app' : '.apk')) throw new Error('Unexpected native artifact');
+        if (props.platform === 'ios' && process.platform === 'darwin') await validateSimulatorApp(join(destination, name), await detectSimulatorTarget(props.projectRoot));
+      });
       if (!result.hit) return null;
       const destination = result.path!;
-      const names = await readdir(destination);
-      const name = names[0];
-      if (names.length !== 1 || !name || !name.endsWith(props.platform === 'ios' ? '.app' : '.apk')) throw new Error('Unexpected native artifact');
-      if (props.platform === 'ios' && process.platform === 'darwin') await validateSimulatorApp(join(destination, name), await detectSimulatorTarget(props.projectRoot));
       console.log(`Layer Cache: ${result.source} hit, ${Math.round(result.elapsedMs)}ms, ${result.bytes} bytes. Native compilation skipped; JS still comes from Metro.`);
-      return join(destination, name);
+      return join(destination, name!);
     } catch {
       warn(); return null;
     }

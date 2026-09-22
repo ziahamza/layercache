@@ -3016,11 +3016,12 @@ var Extractions = class {
     return (0, import_node_path10.join)(this.root, `${owner}-${(0, import_node_crypto2.createHash)("sha256").update(key + digest).digest("hex")}`);
   }
   async usage() {
+    const keys = /* @__PURE__ */ new Set();
     let info;
     try {
       info = await (0, import_promises2.lstat)(this.root);
     } catch (error) {
-      if (error.code === "ENOENT") return 0;
+      if (error.code === "ENOENT") return { bytes: 0, keys };
       throw error;
     }
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe native extraction directory");
@@ -3045,9 +3046,12 @@ var Extractions = class {
       if (!(await (0, import_promises2.lstat)(marker)).isFile()) throw new Error("Unsafe native extraction reservation");
       const reserved = Number(await (0, import_promises2.readFile)(marker, "utf8"));
       if (!Number.isSafeInteger(reserved) || reserved <= 0) throw new Error("Invalid native extraction reservation");
+      const key = await (0, import_promises2.readFile)((0, import_node_path10.join)(path, "key"), "utf8");
+      if (!/^native-v1-[a-f0-9]{64}$/.test(key)) throw new Error("Invalid native extraction key");
+      keys.add(key);
       total += reserved;
     }
-    return total;
+    return { bytes: total, keys };
   }
   async existing(path) {
     try {
@@ -3057,11 +3061,12 @@ var Extractions = class {
       throw error;
     }
   }
-  async create(path, reservation, extract2) {
+  async create(path, key, reservation, extract2) {
     await (0, import_promises2.mkdir)(this.root, { recursive: true, mode: 448 });
     await (0, import_promises2.mkdir)(path, { mode: 448 });
     try {
       await (0, import_promises2.writeFile)((0, import_node_path10.join)(path, "reservation"), String(reservation), { flag: "wx", mode: 384 });
+      await (0, import_promises2.writeFile)((0, import_node_path10.join)(path, "key"), key, { flag: "wx", mode: 384 });
       await extract2((0, import_node_path10.join)(path, "artifact"));
       return (0, import_node_path10.join)(path, "artifact");
     } catch (error) {
@@ -3139,12 +3144,13 @@ var NativeCache = class {
       return { path, size: info.size, used: info.mtimeMs };
     }));
     const pinned = await new Extractions((0, import_node_path11.join)(this.root, "extractions")).usage();
-    if (pinned + reserve + (entries.find((entry) => entry.path === keep)?.size ?? 0) > this.maxBytes) throw new Error("Insufficient local cache budget: live Expo consumers are pinned");
-    let bytes = entries.reduce((total, entry) => total + entry.size, 0) + pinned;
+    const retained = (path) => path === keep || pinned.keys.has((0, import_node_path11.basename)(path, ".tgz"));
+    if (pinned.bytes + reserve + entries.filter((entry) => retained(entry.path)).reduce((total, entry) => total + entry.size, 0) > this.maxBytes) throw new Error("Insufficient local cache budget: live Expo consumers are pinned");
+    let bytes = entries.reduce((total, entry) => total + entry.size, 0) + pinned.bytes;
     const cutoff = Date.now() - (this.options.maxAgeMs ?? 7 * 864e5);
     for (const entry of entries.sort((a, b2) => a.used - b2.used)) {
       if (bytes + reserve <= this.maxBytes && entry.used > cutoff) break;
-      if (entry.path === keep) continue;
+      if (retained(entry.path)) continue;
       await (0, import_promises3.rm)(entry.path, { force: true });
       await (0, import_promises3.rm)(`${entry.path}.sha256`, { force: true });
       bytes -= entry.size;
@@ -3167,10 +3173,10 @@ var NativeCache = class {
   }
   // The provider returns paths still in use by Expo after this method returns.
   // Unlike caller-owned destinations, these bytes remain in the cache budget.
-  async restoreManaged(identity) {
-    return this.restoreInternal(identity, void 0, true);
+  async restoreManaged(identity, validate) {
+    return this.restoreInternal(identity, void 0, true, validate);
   }
-  async restoreInternal(identity, destination, managed = false) {
+  async restoreInternal(identity, destination, managed = false, validate) {
     const started = performance.now();
     const key = artifactKey(identity);
     return this.locked(async () => {
@@ -3219,10 +3225,15 @@ var NativeCache = class {
       if (managed) {
         const extractions = new Extractions((0, import_node_path11.join)(this.root, "extractions"));
         const entry = extractions.path(key, digest);
-        if (await extractions.existing(entry)) destination = (0, import_node_path11.join)(entry, "artifact");
-        else {
+        if (await extractions.existing(entry)) {
+          destination = (0, import_node_path11.join)(entry, "artifact");
+          await validate?.(destination);
+        } else {
           await this.evict(expanded, path);
-          destination = await extractions.create(entry, expanded, (target) => extract(path, target, this.maxBytes));
+          destination = await extractions.create(entry, key, expanded, async (target) => {
+            await extract(path, target, this.maxBytes);
+            await validate?.(target);
+          });
         }
       } else if (destination) await extract(path, destination, this.maxBytes);
       return { hit: true, source, path: destination ? (0, import_node_path11.resolve)(destination) : path, digest, bytes: (await (0, import_promises3.stat)(path)).size, elapsedMs: performance.now() - started };
@@ -3249,6 +3260,10 @@ var NativeCache = class {
         } }), (0, import_node_fs7.createWriteStream)(temporary, { flags: "wx", mode: 384 }));
         await inspect(temporary, this.maxBytes);
         const digest = await digestFile(temporary);
+        const pinned = await new Extractions((0, import_node_path11.join)(this.root, "extractions")).usage();
+        if (pinned.keys.has(key) && await digestFile(path) !== digest) {
+          throw new Error("Cannot replace native artifact backing live Expo consumers; use a complete build key");
+        }
         await (0, import_promises3.rename)(temporary, path);
         await (0, import_promises3.writeFile)(`${path}.sha256`, digest, { mode: 384 });
         const url = this.url(identity);
@@ -3337,7 +3352,7 @@ async function inspect(archive, maxBytes) {
       }
     }
   }
-  return expandedBytes + (count + 3) * 4096;
+  return expandedBytes + (count + 4) * 4096;
 }
 async function extract(archive, destination, maxBytes) {
   const target = (0, import_node_path11.resolve)(destination);
