@@ -21,11 +21,12 @@
   },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "build": "node native/build.ts && node dashboard/build.ts",
-    "typecheck": "tsc --noEmit && tsc -p dashboard/tsconfig.json && tsc -p qa/dashboard/tsconfig.json",
+    "build": "node native/build.ts && node dashboard/build.ts && node cloud/build.ts",
+    "typecheck": "tsc --noEmit && tsc -p dashboard/tsconfig.json && tsc -p qa/dashboard/tsconfig.json && tsc -p cloud/tsconfig.json && tsc -p qa/cloud/tsconfig.json",
     "test": "node --test native/*.test.ts deploy/pool/*.test.ts",
     "test:dashboard": "node qa/dashboard/run.ts",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "test:cloud": "node qa/cloud/run.ts"
   },
   "dependencies": {
     "tar": "7.5.22"

@@ -39,7 +39,7 @@ jobs:
           go build -o "$RUNNER_TEMP/layercache-native-test" ./cmd/layercache
           LAYERCACHE_SETUP_BINARY="$RUNNER_TEMP/layercache-native-test" pnpm test
       - name: Verify shipped JavaScript matches TypeScript
-        run: git diff --exit-code -- native/dist action/native/dist internal/dashboard/assets/app.js
+        run: git diff --exit-code -- native/dist action/native/dist internal/dashboard/assets/app.js internal/portal/assets/app.js
 
   performance:
     name: Cache performance
@@ -74,6 +74,12 @@ jobs:
           DASHBOARD_BROWSER: ${{ matrix.browser }}
           QA_OUTPUT: ${{ runner.temp }}/dashboard-browser-results
         run: pnpm test:dashboard
+      - name: Exercise self-serve cloud onboarding and team isolation
+        env:
+          LAYERCACHE_BIN: ${{ runner.temp }}/layercache-dashboard
+          DASHBOARD_BROWSER: ${{ matrix.browser }}
+          QA_OUTPUT: ${{ runner.temp }}/cloud-browser-results
+        run: pnpm test:cloud
 
   lint:
     name: Workflow and shell checks

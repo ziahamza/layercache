@@ -1,0 +1,16 @@
+{
+  "listen": "127.0.0.1:7440",
+  "origin": "https://cloud.example.com",
+  "dataDir": "/srv/layercache-cloud/data",
+  "githubClientId": "REPLACE_WITH_GITHUB_OAUTH_APP_CLIENT_ID",
+  "githubClientSecretFile": "/etc/layercache-cloud/github-client-secret",
+  "sessionKeyFile": "/etc/layercache-cloud/session-key",
+  "projectTemplateFile": "/etc/layercache-cloud/project-template.json",
+  "storagePool": {
+    "path": "/srv/layercache-cloud",
+    "maxBytes": 8589934592,
+    "minFreeBytes": 1073741824,
+    "hostPath": "/",
+    "hostMinFreeBytes": 8589934592
+  }
+}

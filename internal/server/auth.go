@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +54,11 @@ func (server *Server) githubCapabilityExchange(writer http.ResponseWriter, reque
 		return
 	}
 	var role string
-	if server.cloudStore != nil {
+	subject := "github:" + strings.ToLower(user.Login)
+	if server.projectAuthority != nil {
+		subject = "github-id:" + strconv.FormatInt(user.ID, 10)
+		role, err = server.projectAuthority.MemberRole(request.Context(), server.config.ProjectID, subject)
+	} else if server.cloudStore != nil {
 		role, err = server.cloudStore.MemberRole(
 			request.Context(), server.config.ProjectID, "github:"+strings.ToLower(user.Login),
 		)
@@ -75,7 +80,7 @@ func (server *Server) githubCapabilityExchange(writer http.ResponseWriter, reque
 	}
 	now := time.Now().UTC()
 	token, err := access.MintCapabilityToken(server.config.LocalToken, access.Claims{
-		Subject:       "github:" + strings.ToLower(user.Login),
+		Subject:       subject,
 		Project:       server.config.ProjectID,
 		Compatibility: input.Compatibility,
 		Repository:    strings.ToLower(input.Repository), Ref: input.Ref, DefaultRef: input.DefaultRef,

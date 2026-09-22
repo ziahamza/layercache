@@ -498,3 +498,7 @@ pnpm check
 `pnpm check` typechecks and tests the action, rebuilds its checked-in bundles, and fails on any bundle drift.
 
 See [qa/README.md](qa/README.md) for installed-binary smoke tests with real Turbo, stock `@actions/cache` v1, Buildx, Team Cache, Public Cache, and the Public Build control plane. Run project trials only in disposable independent clones or worktrees, with dedicated cache directories and builder names.
+
+## Self-serve cloud
+
+Connect your CLI to a hosted team project with `layercache connect --cloud URL --project ID --github-cli`. The hosted dashboard provides GitHub sign-in, team invitations and roles, project creation, and cache activity. See [self-serve cloud setup and limits](docs/self-serve-cloud.md) for the engineer workflow and operator deployment.

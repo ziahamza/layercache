@@ -15,6 +15,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/layercache/layercache/internal/access"
 	"github.com/layercache/layercache/internal/config"
@@ -24,6 +25,7 @@ import (
 // from untrusted request fields. Each project retains its own signing secret,
 // persistence, quota and membership policy. Origin is the shared HTTPS origin.
 type ProjectGatewayConfig struct {
+	Authority        ProjectAuthority
 	StoragePool      StoragePoolConfig
 	Origin           string
 	Projects         map[string]config.Config
@@ -33,10 +35,14 @@ type ProjectGatewayConfig struct {
 }
 
 type ProjectGateway struct {
-	pool     StoragePoolConfig
-	projects map[string]*Server
-	aliases  map[string]*Server
-	registry *httputil.ReverseProxy
+	mu        sync.RWMutex
+	origin    string
+	authority ProjectAuthority
+	closed    bool
+	pool      StoragePoolConfig
+	projects  map[string]*Server
+	aliases   map[string]*Server
+	registry  *httputil.ReverseProxy
 }
 
 var projectAlias = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -50,10 +56,10 @@ func NewProjectGateway(ctx context.Context, cfg ProjectGatewayConfig) (_ *Projec
 		(origin.Scheme != "https" && !(origin.Scheme == "http" && isGatewayLoopback(origin.Hostname()))) {
 		return nil, errors.New("gateway origin must be an HTTPS origin, or loopback HTTP, without a path")
 	}
-	if len(cfg.Projects) == 0 || len(cfg.Projects) > 128 {
+	if (len(cfg.Projects) == 0 && cfg.Authority == nil) || len(cfg.Projects) > 128 {
 		return nil, errors.New("gateway requires 1 to 128 projects")
 	}
-	gateway := &ProjectGateway{projects: map[string]*Server{}, aliases: map[string]*Server{}, pool: cfg.StoragePool}
+	gateway := &ProjectGateway{projects: map[string]*Server{}, aliases: map[string]*Server{}, pool: cfg.StoragePool, origin: cfg.Origin, authority: cfg.Authority}
 	defer func() {
 		if err != nil {
 			_ = gateway.Close()
@@ -74,7 +80,7 @@ func NewProjectGateway(ctx context.Context, cfg ProjectGatewayConfig) (_ *Projec
 		if err := project.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid project %s configuration: %w", alias, err)
 		}
-		instance, openErr := New(ctx, project)
+		instance, openErr := NewWithProjectAuthority(ctx, project, cfg.Authority)
 		if openErr != nil {
 			return nil, fmt.Errorf("open project %s: %w", alias, openErr)
 		}
@@ -140,11 +146,49 @@ func canonicalGatewayPath(value string) bool {
 }
 
 func (gateway *ProjectGateway) Close() error {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	gateway.closed = true
 	var errs []error
 	for _, project := range gateway.projects {
 		errs = append(errs, project.Close())
 	}
 	return errors.Join(errs...)
+}
+
+// AddProject publishes a provisioned project without replacing existing runtime
+// instances or configured membership. The caller owns durable project records.
+func (gateway *ProjectGateway) AddProject(ctx context.Context, alias string, cfg config.Config) error {
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	if gateway.closed || gateway.authority == nil {
+		return errors.New("gateway is not accepting managed projects")
+	}
+	if current := gateway.projects[cfg.ProjectID]; current != nil {
+		if gateway.aliases[alias] == current && current.config.LocalToken == cfg.LocalToken {
+			return nil
+		}
+		return errors.New("project identity already exists")
+	}
+	if len(gateway.projects) >= 128 || gateway.aliases[alias] != nil || !projectAlias.MatchString(alias) || cfg.Role != "team" || !gateway.pool.contains(cfg.DataDir) {
+		return errors.New("invalid managed project or project limit reached")
+	}
+	for _, current := range gateway.projects {
+		if current.config.LocalToken == cfg.LocalToken {
+			return errors.New("project signing secrets must be distinct")
+		}
+	}
+	cfg.ActionsArchiveBaseURL = gateway.origin
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	instance, err := NewWithProjectAuthority(ctx, cfg, gateway.authority)
+	if err != nil {
+		return err
+	}
+	instance.storagePool = gateway.pool
+	gateway.projects[cfg.ProjectID], gateway.aliases[alias] = instance, instance
+	return nil
 }
 
 func (gateway *ProjectGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -251,7 +295,9 @@ func (gateway *ProjectGateway) routeProject(w http.ResponseWriter, r *http.Reque
 			return deny()
 		}
 	}
+	gateway.mu.RLock()
 	project := gateway.projects[selected]
+	gateway.mu.RUnlock()
 	if project == nil {
 		return deny()
 	}
@@ -290,7 +336,9 @@ func (gateway *ProjectGateway) serveRegistry(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "unauthorized", 401)
 	}
 	alias, password, ok := r.BasicAuth()
+	gateway.mu.RLock()
 	project := gateway.aliases[alias]
+	gateway.mu.RUnlock()
 	if !ok || project == nil || len(password) > 32<<10 || len(r.Header.Values("Authorization")) != 1 || r.URL.RawPath != "" {
 		deny()
 		return

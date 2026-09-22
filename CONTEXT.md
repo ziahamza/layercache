@@ -8,6 +8,14 @@ Layer Cache describes how engineers reuse build artifacts across machines and tr
 A private cache shared by builds on one engineer's machine.
 _Avoid_: Local Store, local tier
 
+**Team**:
+A group of engineers sharing project access through administrator, writer, and reader roles.
+_Avoid_: Organization, tenant
+
+**Project**:
+A team's repository-backed boundary for cache artifacts and build activity. The same repository can belong to distinct projects in different teams without sharing their artifacts.
+_Avoid_: Workspace, cache namespace
+
 **Team Cache**:
 A private cache shared by engineers and CI within one team.
 _Avoid_: Project Cache, team store, team tier

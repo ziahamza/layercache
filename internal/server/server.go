@@ -47,6 +47,7 @@ type publicBuildCoordinator interface {
 }
 
 type Server struct {
+	projectAuthority  ProjectAuthority
 	storagePool       StoragePoolConfig
 	config            config.Config
 	runtimeLock       *runtimeDirectoryLock
@@ -84,6 +85,17 @@ type Server struct {
 }
 
 func New(ctx context.Context, cfg config.Config) (*Server, error) {
+	return NewWithProjectAuthority(ctx, cfg, nil)
+}
+
+// ProjectAuthority is the durable owner of membership for managed projects.
+// Subjects are stable github-id:<numeric ID> identities. Configured memberships
+// are not reconciled when this authority is supplied.
+type ProjectAuthority interface {
+	MemberRole(context.Context, string, string) (string, error)
+}
+
+func NewWithProjectAuthority(ctx context.Context, cfg config.Config, authority ProjectAuthority) (*Server, error) {
 	policy, err := retention.Normalize(cfg.EvictionPolicy)
 	if err != nil {
 		return nil, err
@@ -110,7 +122,8 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 		return nil, fmt.Errorf("generate runtime instance identity: %w", err)
 	}
 	server := &Server{
-		config: cfg, runtimeLock: runtimeLock, store: localStore, localStore: localStore, mux: http.NewServeMux(), startedAt: time.Now().UTC(),
+		projectAuthority: authority,
+		config:           cfg, runtimeLock: runtimeLock, store: localStore, localStore: localStore, mux: http.NewServeMux(), startedAt: time.Now().UTC(),
 		teamToken: cfg.TeamToken, runtimePID: os.Getpid(), runtimeInstanceID: "runtime-" + runtimeToken,
 	}
 	telemetryContext, cancelTelemetrySetup := context.WithTimeout(ctx, 5*time.Second)
@@ -130,7 +143,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 			return nil, fmt.Errorf("open cloud cache persistence: %w", err)
 		}
 		server.store = server.cloudStore
-		if cfg.Role == "team" || cfg.Role == "public" {
+		if authority == nil && (cfg.Role == "team" || cfg.Role == "public") {
 			if err := server.applyConfiguredCloudMemberships(ctx, server.cloudStore); err != nil {
 				_ = server.Close()
 				return nil, err
