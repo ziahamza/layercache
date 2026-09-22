@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 // native/client.ts
-import { createHash, randomUUID } from "node:crypto";
+import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { lstat, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, readdir as readdir2, readFile as readFile2, rename, rm as rm2, stat, utimes, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join as join2, resolve } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2980,13 +2980,87 @@ var To = (s3) => {
   s3.mtimeCache || (s3.mtimeCache = /* @__PURE__ */ new Map()), s3.filter = t ? (e, i) => t(e, i) && !((s3.mtimeCache?.get(e) ?? i.mtime ?? 0) > (i.mtime ?? 0)) : (e, i) => !((s3.mtimeCache?.get(e) ?? i.mtime ?? 0) > (i.mtime ?? 0));
 };
 
+// native/extractions.ts
+import { randomUUID, createHash } from "node:crypto";
+import { lstat, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+var owner = `${process.pid}-${randomUUID()}`;
+var Extractions = class {
+  root;
+  constructor(root) {
+    this.root = root;
+  }
+  path(key, digest) {
+    return join(this.root, `${owner}-${createHash("sha256").update(key + digest).digest("hex")}`);
+  }
+  async usage() {
+    const keys = /* @__PURE__ */ new Set();
+    let info;
+    try {
+      info = await lstat(this.root);
+    } catch (error) {
+      if (error.code === "ENOENT") return { bytes: 0, keys };
+      throw error;
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe native extraction directory");
+    let total = 0;
+    for (const name of await readdir(this.root)) {
+      const match = /^(\d+)-[a-f0-9-]{36}-[a-f0-9]{64}$/.exec(name);
+      if (!match) throw new Error("Unknown native extraction entry");
+      const path = join(this.root, name);
+      const entry = await lstat(path);
+      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("Unsafe native extraction entry");
+      let alive = true;
+      try {
+        process.kill(Number(match[1]), 0);
+      } catch (error) {
+        if (error.code === "ESRCH") alive = false;
+      }
+      if (!alive) {
+        await rm(path, { recursive: true });
+        continue;
+      }
+      const marker = join(path, "reservation");
+      if (!(await lstat(marker)).isFile()) throw new Error("Unsafe native extraction reservation");
+      const reserved = Number(await readFile(marker, "utf8"));
+      if (!Number.isSafeInteger(reserved) || reserved <= 0) throw new Error("Invalid native extraction reservation");
+      const key = await readFile(join(path, "key"), "utf8");
+      if (!/^native-v1-[a-f0-9]{64}$/.test(key)) throw new Error("Invalid native extraction key");
+      keys.add(key);
+      total += reserved;
+    }
+    return { bytes: total, keys };
+  }
+  async existing(path) {
+    try {
+      return (await lstat(join(path, "artifact"))).isDirectory();
+    } catch (error) {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  async create(path, key, reservation, extract2) {
+    await mkdir(this.root, { recursive: true, mode: 448 });
+    await mkdir(path, { mode: 448 });
+    try {
+      await writeFile(join(path, "reservation"), String(reservation), { flag: "wx", mode: 384 });
+      await writeFile(join(path, "key"), key, { flag: "wx", mode: 384 });
+      await extract2(join(path, "artifact"));
+      return join(path, "artifact");
+    } catch (error) {
+      await rm(path, { recursive: true, force: true });
+      throw error;
+    }
+  }
+};
+
 // native/client.ts
 function environmentOptions(options = {}, env = process.env) {
   if (env.LAYER_CACHE_TOKEN) return { ...options, endpoint: env.LAYER_CACHE_URL ?? options.endpoint, token: env.LAYER_CACHE_TOKEN };
   if (env.TURBO_TOKEN && env.TURBO_API) return { ...options, endpoint: env.TURBO_API, token: env.TURBO_TOKEN };
   return { ...options, endpoint: env.LAYER_CACHE_URL ?? options.endpoint, token: void 0 };
 }
-var sha = (value) => createHash("sha256").update(value).digest("hex");
+var sha = (value) => createHash2("sha256").update(value).digest("hex");
 function artifactKey(identity) {
   if (!identity.project || identity.project.length > 256 || /[\x00-\x20\x7f]/.test(identity.project)) throw new Error("Invalid project");
   if (!/^[a-z0-9][a-z0-9_.:+@-]{0,255}$/.test(identity.compatibility)) throw new Error("Explicit toolchain compatibility required");
@@ -2994,7 +3068,7 @@ function artifactKey(identity) {
   return `native-v1-${sha(JSON.stringify([identity.project, identity.compatibility, identity.key]))}`;
 }
 async function digestFile(path) {
-  const hash = createHash("sha256");
+  const hash = createHash2("sha256");
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest("hex");
 }
@@ -3010,19 +3084,19 @@ var NativeCache = class {
   maxBytes;
   options;
   constructor(options = {}) {
-    this.root = resolve(options.cacheDir ?? process.env.LAYER_CACHE_NATIVE_DIR ?? join(homedir(), ".cache", "layercache", "native-v1"));
+    this.root = resolve(options.cacheDir ?? process.env.LAYER_CACHE_NATIVE_DIR ?? join2(homedir(), ".cache", "layercache", "native-v1"));
     this.maxBytes = options.maxBytes ?? 5 * 1024 ** 3;
     if (!Number.isSafeInteger(this.maxBytes) || this.maxBytes <= 0) throw new Error("maxBytes must be positive integer bytes");
     if (options.maxAgeMs !== void 0 && (!Number.isSafeInteger(options.maxAgeMs) || options.maxAgeMs <= 0)) throw new Error("maxAgeMs must be positive integer milliseconds");
     this.options = { ...options, endpoint: options.endpoint ? origin(options.endpoint) : void 0 };
   }
   async locked(run) {
-    await mkdir(this.root, { recursive: true, mode: 448 });
-    const lock = join(this.root, ".lock");
+    await mkdir2(this.root, { recursive: true, mode: 448 });
+    const lock = join2(this.root, ".lock");
     const deadline = Date.now() + (this.options.timeoutMs ?? 12e4);
     while (true) {
       try {
-        await mkdir(lock);
+        await mkdir2(lock);
         break;
       } catch (error) {
         if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
@@ -3033,7 +3107,7 @@ var NativeCache = class {
     try {
       return await run();
     } finally {
-      await rm(lock, { recursive: true, force: true });
+      await rm2(lock, { recursive: true, force: true });
     }
   }
   url(identity) {
@@ -3047,38 +3121,50 @@ var NativeCache = class {
   }
   async evict(reserve, keep) {
     if (reserve > this.maxBytes) throw new Error("Artifact exceeds local cache budget");
-    const entries = await Promise.all((await readdir(this.root)).filter((name) => /^native-v1-[a-f0-9]{64}\.tgz$/.test(name)).map(async (name) => {
-      const path = join(this.root, name);
+    const entries = await Promise.all((await readdir2(this.root)).filter((name) => /^native-v1-[a-f0-9]{64}\.tgz$/.test(name)).map(async (name) => {
+      const path = join2(this.root, name);
       const info = await stat(path);
       return { path, size: info.size, used: info.mtimeMs };
     }));
-    let bytes = entries.reduce((total, entry) => total + entry.size, 0);
+    const pinned = await new Extractions(join2(this.root, "extractions")).usage();
+    const retained = (path) => path === keep || pinned.keys.has(basename(path, ".tgz"));
+    if (pinned.bytes + reserve + entries.filter((entry) => retained(entry.path)).reduce((total, entry) => total + entry.size, 0) > this.maxBytes) throw new Error("Insufficient local cache budget: live Expo consumers are pinned");
+    let bytes = entries.reduce((total, entry) => total + entry.size, 0) + pinned.bytes;
     const cutoff = Date.now() - (this.options.maxAgeMs ?? 7 * 864e5);
     for (const entry of entries.sort((a, b2) => a.used - b2.used)) {
       if (bytes + reserve <= this.maxBytes && entry.used > cutoff) break;
-      if (entry.path === keep) continue;
-      await rm(entry.path, { force: true });
-      await rm(`${entry.path}.sha256`, { force: true });
+      if (retained(entry.path)) continue;
+      await rm2(entry.path, { force: true });
+      await rm2(`${entry.path}.sha256`, { force: true });
       bytes -= entry.size;
     }
     if (bytes + reserve > this.maxBytes) throw new Error("Insufficient local cache budget");
   }
   async verified(path) {
     try {
-      const expected = (await readFile(`${path}.sha256`, "utf8")).trim();
+      const expected = (await readFile2(`${path}.sha256`, "utf8")).trim();
       if (!/^[a-f0-9]{64}$/.test(expected) || await digestFile(path) !== expected) throw new Error("Corrupt local artifact");
       return expected;
     } catch {
-      await rm(path, { force: true });
-      await rm(`${path}.sha256`, { force: true });
+      await rm2(path, { force: true });
+      await rm2(`${path}.sha256`, { force: true });
       return null;
     }
   }
   async restore(identity, destination) {
+    return this.restoreInternal(identity, destination);
+  }
+  // The provider returns paths still in use by Expo after this method returns.
+  // Unlike caller-owned destinations, these bytes remain in the cache budget.
+  async restoreManaged(identity, validate) {
+    return this.restoreInternal(identity, void 0, true, validate);
+  }
+  async restoreInternal(identity, destination, managed = false, validate) {
     const started = performance.now();
     const key = artifactKey(identity);
     return this.locked(async () => {
-      const path = join(this.root, `${key}.tgz`);
+      await new Extractions(join2(this.root, "extractions")).usage();
+      const path = join2(this.root, `${key}.tgz`);
       let digest = await this.verified(path);
       let source = "local";
       if (!digest) {
@@ -3100,7 +3186,7 @@ var NativeCache = class {
           throw new Error("Invalid artifact digest or size");
         }
         await this.evict(size);
-        const temporary = `${path}.${randomUUID()}.partial`;
+        const temporary = `${path}.${randomUUID2()}.partial`;
         let received = 0;
         try {
           await pipeline(Readable.fromWeb(response.body), new Transform({ transform(chunk, _encoding, callback) {
@@ -3110,16 +3196,29 @@ var NativeCache = class {
           digest = await digestFile(temporary);
           if (received !== size || `sha256:${digest}` !== expected) throw new Error("Artifact integrity check failed");
           await rename(temporary, path);
-          await writeFile(`${path}.sha256`, digest, { mode: 384 });
+          await writeFile2(`${path}.sha256`, digest, { mode: 384 });
         } finally {
-          await rm(temporary, { force: true });
+          await rm2(temporary, { force: true });
         }
         source = "team";
       }
       await this.evict(0, path);
       await utimes(path, /* @__PURE__ */ new Date(), /* @__PURE__ */ new Date());
-      await inspect(path, this.maxBytes);
-      if (destination) await extract(path, destination, this.maxBytes);
+      const expanded = await inspect(path, this.maxBytes);
+      if (managed) {
+        const extractions = new Extractions(join2(this.root, "extractions"));
+        const entry = extractions.path(key, digest);
+        if (await extractions.existing(entry)) {
+          destination = join2(entry, "artifact");
+          await validate?.(destination);
+        } else {
+          await this.evict(expanded, path);
+          destination = await extractions.create(entry, key, expanded, async (target) => {
+            await extract(path, target, this.maxBytes);
+            await validate?.(target);
+          });
+        }
+      } else if (destination) await extract(path, destination, this.maxBytes);
       return { hit: true, source, path: destination ? resolve(destination) : path, digest, bytes: (await stat(path)).size, elapsedMs: performance.now() - started };
     });
   }
@@ -3127,8 +3226,8 @@ var NativeCache = class {
     const started = performance.now();
     const key = artifactKey(identity);
     return this.locked(async () => {
-      const path = join(this.root, `${key}.tgz`);
-      const temporary = `${path}.${randomUUID()}.partial`;
+      const path = join2(this.root, `${key}.tgz`);
+      const temporary = `${path}.${randomUUID2()}.partial`;
       try {
         const inputPath = resolve(input);
         const info = await stat(inputPath);
@@ -3144,8 +3243,12 @@ var NativeCache = class {
         } }), createWriteStream(temporary, { flags: "wx", mode: 384 }));
         await inspect(temporary, this.maxBytes);
         const digest = await digestFile(temporary);
+        const pinned = await new Extractions(join2(this.root, "extractions")).usage();
+        if (pinned.keys.has(key) && await digestFile(path) !== digest) {
+          throw new Error("Cannot replace native artifact backing live Expo consumers; use a complete build key");
+        }
         await rename(temporary, path);
-        await writeFile(`${path}.sha256`, digest, { mode: 384 });
+        await writeFile2(`${path}.sha256`, digest, { mode: 384 });
         const url = this.url(identity);
         if (url) {
           const blob = await import("node:fs").then((fs2) => fs2.openAsBlob(path));
@@ -3162,7 +3265,7 @@ var NativeCache = class {
         }
         return { hit: false, source: url ? "team" : "local", path, digest, bytes: size, elapsedMs: performance.now() - started };
       } finally {
-        await rm(temporary, { force: true });
+        await rm2(temporary, { force: true });
       }
     });
   }
@@ -3232,15 +3335,16 @@ async function inspect(archive, maxBytes) {
       }
     }
   }
+  return expandedBytes + (count + 4) * 4096;
 }
 async function extract(archive, destination, maxBytes) {
   const target = resolve(destination);
-  await mkdir(dirname(target), { recursive: true });
-  await mkdir(target);
+  await mkdir2(dirname(target), { recursive: true });
+  await mkdir2(target);
   try {
     await So({ file: archive, cwd: target, strict: true, preservePaths: false });
   } catch (error) {
-    await rm(target, { recursive: true, force: true });
+    await rm2(target, { recursive: true, force: true });
     throw error;
   }
 }
@@ -3249,9 +3353,9 @@ async function archiveBound(path) {
   let count = 0;
   async function visit(current) {
     if (++count > 1e5) throw new Error("Too many build files");
-    const info = await lstat(current);
+    const info = await lstat2(current);
     bytes += 8192 + Math.ceil(info.size * 1.01);
-    if (info.isDirectory()) for (const name of await readdir(current)) await visit(join(current, name));
+    if (info.isDirectory()) for (const name of await readdir2(current)) await visit(join2(current, name));
     else if (!info.isFile() && !info.isSymbolicLink()) throw new Error("Unsupported build file");
   }
   await visit(path);
@@ -3260,19 +3364,19 @@ async function archiveBound(path) {
 
 // native/source.ts
 import { execFileSync } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
-import { lstat as lstat2, readlink } from "node:fs/promises";
-import { join as join2 } from "node:path";
+import { createHash as createHash3 } from "node:crypto";
+import { lstat as lstat3, readlink } from "node:fs/promises";
+import { join as join3 } from "node:path";
 async function sourceKey(directory) {
   const git = (args) => execFileSync("git", ["-C", directory, ...args], { encoding: "utf8", maxBuffer: 32 * 1024 ** 2 });
   const root = git(["rev-parse", "--show-toplevel"]).trim();
   const files = execFileSync("git", ["-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], { encoding: "utf8", maxBuffer: 32 * 1024 ** 2 });
-  const hash = createHash2("sha256").update("layercache-source-v1\0");
+  const hash = createHash3("sha256").update("layercache-source-v1\0");
   for (const name of [...new Set(files.split("\0").filter(Boolean))].sort()) {
-    const path = join2(root, name);
+    const path = join3(root, name);
     let value;
     try {
-      const info = await lstat2(path);
+      const info = await lstat3(path);
       if (info.isSymbolicLink()) value = [name, "link", await readlink(path)];
       else if (info.isFile()) value = [name, "file", info.mode & 73 ? "executable" : "regular", await digestFile(path)];
       else throw new Error("Submodules and special source files need an explicit build key");
@@ -3289,11 +3393,11 @@ async function sourceKey(directory) {
 import { resolve as resolve2 } from "node:path";
 
 // native/expo-identity.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createRequire } from "node:module";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 function identityForBuild(props, options) {
   if (!options.app) throw new Error("An app identity is required");
   if (!options.compatibility) throw new Error("Resolve the toolchain before creating a native build key");
@@ -3307,7 +3411,7 @@ function identityForBuild(props, options) {
   };
 }
 async function fingerprintForProject(projectRoot) {
-  const project = createRequire(join3(projectRoot, "package.json"));
+  const project = createRequire(join4(projectRoot, "package.json"));
   let fingerprint;
   try {
     fingerprint = project("@expo/fingerprint");
@@ -3324,7 +3428,7 @@ function prepareExpoEnvironment(projectRoot) {
   process.env.NODE_ENV ||= "development";
   process.env.BABEL_ENV ||= process.env.NODE_ENV;
   Object.assign(globalThis, { __DEV__: process.env.NODE_ENV !== "production" });
-  const project = createRequire(join3(projectRoot, "package.json"));
+  const project = createRequire(join4(projectRoot, "package.json"));
   const expo = createRequire(project.resolve("expo/package.json"));
   const cli = createRequire(expo.resolve("@expo/cli/package.json"));
   const env = cli("@expo/env");
@@ -3339,7 +3443,7 @@ function parseSimulatorTarget(value) {
 }
 function simulatorCompatibility(target) {
   parseSimulatorTarget(JSON.stringify(target));
-  const digest = createHash3("sha256").update(JSON.stringify([target.os, target.arch, target.xcode, target.sdk])).digest("hex");
+  const digest = createHash4("sha256").update(JSON.stringify([target.os, target.arch, target.xcode, target.sdk])).digest("hex");
   return `expo-ios-toolchain-v1-${digest}`;
 }
 async function detectSimulatorTarget(projectRoot) {

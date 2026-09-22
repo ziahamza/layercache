@@ -23,14 +23,14 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // native/client.ts
-var import_node_crypto2 = require("node:crypto");
+var import_node_crypto3 = require("node:crypto");
 var import_node_fs7 = require("node:fs");
-var import_promises2 = require("node:fs/promises");
+var import_promises3 = require("node:fs/promises");
 var import_node_os = require("node:os");
-var import_node_path10 = require("node:path");
+var import_node_path11 = require("node:path");
 var import_node_stream2 = require("node:stream");
-var import_promises3 = require("node:stream/promises");
-var import_promises4 = require("node:timers/promises");
+var import_promises4 = require("node:stream/promises");
+var import_promises5 = require("node:timers/promises");
 var import_node_zlib = require("node:zlib");
 
 // node_modules/.pnpm/tar@7.5.22/node_modules/tar/dist/esm/index.min.js
@@ -3002,8 +3002,82 @@ var To = (s3) => {
   s3.mtimeCache || (s3.mtimeCache = /* @__PURE__ */ new Map()), s3.filter = t ? (e, i) => t(e, i) && !((s3.mtimeCache?.get(e) ?? i.mtime ?? 0) > (i.mtime ?? 0)) : (e, i) => !((s3.mtimeCache?.get(e) ?? i.mtime ?? 0) > (i.mtime ?? 0));
 };
 
+// native/extractions.ts
+var import_node_crypto2 = require("node:crypto");
+var import_promises2 = require("node:fs/promises");
+var import_node_path10 = require("node:path");
+var owner = `${process.pid}-${(0, import_node_crypto2.randomUUID)()}`;
+var Extractions = class {
+  root;
+  constructor(root) {
+    this.root = root;
+  }
+  path(key, digest) {
+    return (0, import_node_path10.join)(this.root, `${owner}-${(0, import_node_crypto2.createHash)("sha256").update(key + digest).digest("hex")}`);
+  }
+  async usage() {
+    const keys = /* @__PURE__ */ new Set();
+    let info;
+    try {
+      info = await (0, import_promises2.lstat)(this.root);
+    } catch (error) {
+      if (error.code === "ENOENT") return { bytes: 0, keys };
+      throw error;
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe native extraction directory");
+    let total = 0;
+    for (const name of await (0, import_promises2.readdir)(this.root)) {
+      const match = /^(\d+)-[a-f0-9-]{36}-[a-f0-9]{64}$/.exec(name);
+      if (!match) throw new Error("Unknown native extraction entry");
+      const path = (0, import_node_path10.join)(this.root, name);
+      const entry = await (0, import_promises2.lstat)(path);
+      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("Unsafe native extraction entry");
+      let alive = true;
+      try {
+        process.kill(Number(match[1]), 0);
+      } catch (error) {
+        if (error.code === "ESRCH") alive = false;
+      }
+      if (!alive) {
+        await (0, import_promises2.rm)(path, { recursive: true });
+        continue;
+      }
+      const marker = (0, import_node_path10.join)(path, "reservation");
+      if (!(await (0, import_promises2.lstat)(marker)).isFile()) throw new Error("Unsafe native extraction reservation");
+      const reserved = Number(await (0, import_promises2.readFile)(marker, "utf8"));
+      if (!Number.isSafeInteger(reserved) || reserved <= 0) throw new Error("Invalid native extraction reservation");
+      const key = await (0, import_promises2.readFile)((0, import_node_path10.join)(path, "key"), "utf8");
+      if (!/^native-v1-[a-f0-9]{64}$/.test(key)) throw new Error("Invalid native extraction key");
+      keys.add(key);
+      total += reserved;
+    }
+    return { bytes: total, keys };
+  }
+  async existing(path) {
+    try {
+      return (await (0, import_promises2.lstat)((0, import_node_path10.join)(path, "artifact"))).isDirectory();
+    } catch (error) {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  async create(path, key, reservation, extract2) {
+    await (0, import_promises2.mkdir)(this.root, { recursive: true, mode: 448 });
+    await (0, import_promises2.mkdir)(path, { mode: 448 });
+    try {
+      await (0, import_promises2.writeFile)((0, import_node_path10.join)(path, "reservation"), String(reservation), { flag: "wx", mode: 384 });
+      await (0, import_promises2.writeFile)((0, import_node_path10.join)(path, "key"), key, { flag: "wx", mode: 384 });
+      await extract2((0, import_node_path10.join)(path, "artifact"));
+      return (0, import_node_path10.join)(path, "artifact");
+    } catch (error) {
+      await (0, import_promises2.rm)(path, { recursive: true, force: true });
+      throw error;
+    }
+  }
+};
+
 // native/client.ts
-var sha = (value) => (0, import_node_crypto2.createHash)("sha256").update(value).digest("hex");
+var sha = (value) => (0, import_node_crypto3.createHash)("sha256").update(value).digest("hex");
 function artifactKey(identity) {
   if (!identity.project || identity.project.length > 256 || /[\x00-\x20\x7f]/.test(identity.project)) throw new Error("Invalid project");
   if (!/^[a-z0-9][a-z0-9_.:+@-]{0,255}$/.test(identity.compatibility)) throw new Error("Explicit toolchain compatibility required");
@@ -3011,7 +3085,7 @@ function artifactKey(identity) {
   return `native-v1-${sha(JSON.stringify([identity.project, identity.compatibility, identity.key]))}`;
 }
 async function digestFile(path) {
-  const hash = (0, import_node_crypto2.createHash)("sha256");
+  const hash = (0, import_node_crypto3.createHash)("sha256");
   for await (const chunk of (0, import_node_fs7.createReadStream)(path)) hash.update(chunk);
   return hash.digest("hex");
 }
@@ -3027,30 +3101,30 @@ var NativeCache = class {
   maxBytes;
   options;
   constructor(options = {}) {
-    this.root = (0, import_node_path10.resolve)(options.cacheDir ?? process.env.LAYER_CACHE_NATIVE_DIR ?? (0, import_node_path10.join)((0, import_node_os.homedir)(), ".cache", "layercache", "native-v1"));
+    this.root = (0, import_node_path11.resolve)(options.cacheDir ?? process.env.LAYER_CACHE_NATIVE_DIR ?? (0, import_node_path11.join)((0, import_node_os.homedir)(), ".cache", "layercache", "native-v1"));
     this.maxBytes = options.maxBytes ?? 5 * 1024 ** 3;
     if (!Number.isSafeInteger(this.maxBytes) || this.maxBytes <= 0) throw new Error("maxBytes must be positive integer bytes");
     if (options.maxAgeMs !== void 0 && (!Number.isSafeInteger(options.maxAgeMs) || options.maxAgeMs <= 0)) throw new Error("maxAgeMs must be positive integer milliseconds");
     this.options = { ...options, endpoint: options.endpoint ? origin(options.endpoint) : void 0 };
   }
   async locked(run) {
-    await (0, import_promises2.mkdir)(this.root, { recursive: true, mode: 448 });
-    const lock = (0, import_node_path10.join)(this.root, ".lock");
+    await (0, import_promises3.mkdir)(this.root, { recursive: true, mode: 448 });
+    const lock = (0, import_node_path11.join)(this.root, ".lock");
     const deadline = Date.now() + (this.options.timeoutMs ?? 12e4);
     while (true) {
       try {
-        await (0, import_promises2.mkdir)(lock);
+        await (0, import_promises3.mkdir)(lock);
         break;
       } catch (error) {
         if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
         if (Date.now() >= deadline) throw new Error("Native cache is busy; inspect its .lock directory");
-        await (0, import_promises4.setTimeout)(100);
+        await (0, import_promises5.setTimeout)(100);
       }
     }
     try {
       return await run();
     } finally {
-      await (0, import_promises2.rm)(lock, { recursive: true, force: true });
+      await (0, import_promises3.rm)(lock, { recursive: true, force: true });
     }
   }
   url(identity) {
@@ -3064,38 +3138,50 @@ var NativeCache = class {
   }
   async evict(reserve, keep) {
     if (reserve > this.maxBytes) throw new Error("Artifact exceeds local cache budget");
-    const entries = await Promise.all((await (0, import_promises2.readdir)(this.root)).filter((name) => /^native-v1-[a-f0-9]{64}\.tgz$/.test(name)).map(async (name) => {
-      const path = (0, import_node_path10.join)(this.root, name);
-      const info = await (0, import_promises2.stat)(path);
+    const entries = await Promise.all((await (0, import_promises3.readdir)(this.root)).filter((name) => /^native-v1-[a-f0-9]{64}\.tgz$/.test(name)).map(async (name) => {
+      const path = (0, import_node_path11.join)(this.root, name);
+      const info = await (0, import_promises3.stat)(path);
       return { path, size: info.size, used: info.mtimeMs };
     }));
-    let bytes = entries.reduce((total, entry) => total + entry.size, 0);
+    const pinned = await new Extractions((0, import_node_path11.join)(this.root, "extractions")).usage();
+    const retained = (path) => path === keep || pinned.keys.has((0, import_node_path11.basename)(path, ".tgz"));
+    if (pinned.bytes + reserve + entries.filter((entry) => retained(entry.path)).reduce((total, entry) => total + entry.size, 0) > this.maxBytes) throw new Error("Insufficient local cache budget: live Expo consumers are pinned");
+    let bytes = entries.reduce((total, entry) => total + entry.size, 0) + pinned.bytes;
     const cutoff = Date.now() - (this.options.maxAgeMs ?? 7 * 864e5);
     for (const entry of entries.sort((a, b2) => a.used - b2.used)) {
       if (bytes + reserve <= this.maxBytes && entry.used > cutoff) break;
-      if (entry.path === keep) continue;
-      await (0, import_promises2.rm)(entry.path, { force: true });
-      await (0, import_promises2.rm)(`${entry.path}.sha256`, { force: true });
+      if (retained(entry.path)) continue;
+      await (0, import_promises3.rm)(entry.path, { force: true });
+      await (0, import_promises3.rm)(`${entry.path}.sha256`, { force: true });
       bytes -= entry.size;
     }
     if (bytes + reserve > this.maxBytes) throw new Error("Insufficient local cache budget");
   }
   async verified(path) {
     try {
-      const expected = (await (0, import_promises2.readFile)(`${path}.sha256`, "utf8")).trim();
+      const expected = (await (0, import_promises3.readFile)(`${path}.sha256`, "utf8")).trim();
       if (!/^[a-f0-9]{64}$/.test(expected) || await digestFile(path) !== expected) throw new Error("Corrupt local artifact");
       return expected;
     } catch {
-      await (0, import_promises2.rm)(path, { force: true });
-      await (0, import_promises2.rm)(`${path}.sha256`, { force: true });
+      await (0, import_promises3.rm)(path, { force: true });
+      await (0, import_promises3.rm)(`${path}.sha256`, { force: true });
       return null;
     }
   }
   async restore(identity, destination) {
+    return this.restoreInternal(identity, destination);
+  }
+  // The provider returns paths still in use by Expo after this method returns.
+  // Unlike caller-owned destinations, these bytes remain in the cache budget.
+  async restoreManaged(identity, validate) {
+    return this.restoreInternal(identity, void 0, true, validate);
+  }
+  async restoreInternal(identity, destination, managed = false, validate) {
     const started = performance.now();
     const key = artifactKey(identity);
     return this.locked(async () => {
-      const path = (0, import_node_path10.join)(this.root, `${key}.tgz`);
+      await new Extractions((0, import_node_path11.join)(this.root, "extractions")).usage();
+      const path = (0, import_node_path11.join)(this.root, `${key}.tgz`);
       let digest = await this.verified(path);
       let source = "local";
       if (!digest) {
@@ -3117,52 +3203,69 @@ var NativeCache = class {
           throw new Error("Invalid artifact digest or size");
         }
         await this.evict(size);
-        const temporary = `${path}.${(0, import_node_crypto2.randomUUID)()}.partial`;
+        const temporary = `${path}.${(0, import_node_crypto3.randomUUID)()}.partial`;
         let received = 0;
         try {
-          await (0, import_promises3.pipeline)(import_node_stream2.Readable.fromWeb(response.body), new import_node_stream2.Transform({ transform(chunk, _encoding, callback) {
+          await (0, import_promises4.pipeline)(import_node_stream2.Readable.fromWeb(response.body), new import_node_stream2.Transform({ transform(chunk, _encoding, callback) {
             received += chunk.length;
             callback(received > size ? new Error("Artifact exceeds declared size") : null, chunk);
           } }), (0, import_node_fs7.createWriteStream)(temporary, { flags: "wx", mode: 384 }));
           digest = await digestFile(temporary);
           if (received !== size || `sha256:${digest}` !== expected) throw new Error("Artifact integrity check failed");
-          await (0, import_promises2.rename)(temporary, path);
-          await (0, import_promises2.writeFile)(`${path}.sha256`, digest, { mode: 384 });
+          await (0, import_promises3.rename)(temporary, path);
+          await (0, import_promises3.writeFile)(`${path}.sha256`, digest, { mode: 384 });
         } finally {
-          await (0, import_promises2.rm)(temporary, { force: true });
+          await (0, import_promises3.rm)(temporary, { force: true });
         }
         source = "team";
       }
       await this.evict(0, path);
-      await (0, import_promises2.utimes)(path, /* @__PURE__ */ new Date(), /* @__PURE__ */ new Date());
-      await inspect(path, this.maxBytes);
-      if (destination) await extract(path, destination, this.maxBytes);
-      return { hit: true, source, path: destination ? (0, import_node_path10.resolve)(destination) : path, digest, bytes: (await (0, import_promises2.stat)(path)).size, elapsedMs: performance.now() - started };
+      await (0, import_promises3.utimes)(path, /* @__PURE__ */ new Date(), /* @__PURE__ */ new Date());
+      const expanded = await inspect(path, this.maxBytes);
+      if (managed) {
+        const extractions = new Extractions((0, import_node_path11.join)(this.root, "extractions"));
+        const entry = extractions.path(key, digest);
+        if (await extractions.existing(entry)) {
+          destination = (0, import_node_path11.join)(entry, "artifact");
+          await validate?.(destination);
+        } else {
+          await this.evict(expanded, path);
+          destination = await extractions.create(entry, key, expanded, async (target) => {
+            await extract(path, target, this.maxBytes);
+            await validate?.(target);
+          });
+        }
+      } else if (destination) await extract(path, destination, this.maxBytes);
+      return { hit: true, source, path: destination ? (0, import_node_path11.resolve)(destination) : path, digest, bytes: (await (0, import_promises3.stat)(path)).size, elapsedMs: performance.now() - started };
     });
   }
   async save(identity, input) {
     const started = performance.now();
     const key = artifactKey(identity);
     return this.locked(async () => {
-      const path = (0, import_node_path10.join)(this.root, `${key}.tgz`);
-      const temporary = `${path}.${(0, import_node_crypto2.randomUUID)()}.partial`;
+      const path = (0, import_node_path11.join)(this.root, `${key}.tgz`);
+      const temporary = `${path}.${(0, import_node_crypto3.randomUUID)()}.partial`;
       try {
-        const inputPath = (0, import_node_path10.resolve)(input);
-        const info = await (0, import_promises2.stat)(inputPath);
+        const inputPath = (0, import_node_path11.resolve)(input);
+        const info = await (0, import_promises3.stat)(inputPath);
         if (!info.isDirectory() && !info.isFile()) throw new Error("Build must be a directory or regular file");
         const reserve = await archiveBound(inputPath);
         await this.evict(reserve);
-        const archive = Qn({ cwd: (0, import_node_path10.dirname)(inputPath), portable: true, gzip: true, noMtime: true, strict: true }, [(0, import_node_path10.basename)(inputPath)]);
+        const archive = Qn({ cwd: (0, import_node_path11.dirname)(inputPath), portable: true, gzip: true, noMtime: true, strict: true }, [(0, import_node_path11.basename)(inputPath)]);
         let size = 0;
         const limit = reserve;
-        await (0, import_promises3.pipeline)(archive, new import_node_stream2.Transform({ transform(chunk, _encoding, callback) {
+        await (0, import_promises4.pipeline)(archive, new import_node_stream2.Transform({ transform(chunk, _encoding, callback) {
           size += chunk.length;
           callback(size > limit ? new Error("Artifact exceeds local cache budget") : null, chunk);
         } }), (0, import_node_fs7.createWriteStream)(temporary, { flags: "wx", mode: 384 }));
         await inspect(temporary, this.maxBytes);
         const digest = await digestFile(temporary);
-        await (0, import_promises2.rename)(temporary, path);
-        await (0, import_promises2.writeFile)(`${path}.sha256`, digest, { mode: 384 });
+        const pinned = await new Extractions((0, import_node_path11.join)(this.root, "extractions")).usage();
+        if (pinned.keys.has(key) && await digestFile(path) !== digest) {
+          throw new Error("Cannot replace native artifact backing live Expo consumers; use a complete build key");
+        }
+        await (0, import_promises3.rename)(temporary, path);
+        await (0, import_promises3.writeFile)(`${path}.sha256`, digest, { mode: 384 });
         const url = this.url(identity);
         if (url) {
           const blob = await import("node:fs").then((fs2) => fs2.openAsBlob(path));
@@ -3179,7 +3282,7 @@ var NativeCache = class {
         }
         return { hit: false, source: url ? "team" : "local", path, digest, bytes: size, elapsedMs: performance.now() - started };
       } finally {
-        await (0, import_promises2.rm)(temporary, { force: true });
+        await (0, import_promises3.rm)(temporary, { force: true });
       }
     });
   }
@@ -3197,7 +3300,7 @@ async function inspect(archive, maxBytes) {
     try {
       if (++count > 1e5) throw new Error("Too many archive entries");
       const path = entry.path.replace(/\/$/, "");
-      if (!path || (0, import_node_path10.isAbsolute)(path) || path.includes("\\") || path.split("/").some((part) => part === ".." || part === "") || /[\x00-\x1f]/.test(path)) throw new Error("Unsafe archive path");
+      if (!path || (0, import_node_path11.isAbsolute)(path) || path.includes("\\") || path.split("/").some((part) => part === ".." || part === "") || /[\x00-\x1f]/.test(path)) throw new Error("Unsafe archive path");
       if (paths.has(path) || foldedPaths.has(path.toLowerCase())) throw new Error("Duplicate or case-colliding archive path");
       paths.add(path);
       foldedPaths.add(path.toLowerCase());
@@ -3208,15 +3311,15 @@ async function inspect(archive, maxBytes) {
       if (entry.type === "SymbolicLink") {
         const target = entry.linkpath;
         if (!target) throw new Error("Empty archive link");
-        const resolved = (0, import_node_path10.resolve)("/artifact", (0, import_node_path10.dirname)(path), target);
-        if ((0, import_node_path10.isAbsolute)(target) || target.includes("\\") || !resolved.startsWith("/artifact/")) throw new Error("Unsafe archive link");
+        const resolved = (0, import_node_path11.resolve)("/artifact", (0, import_node_path11.dirname)(path), target);
+        if ((0, import_node_path11.isAbsolute)(target) || target.includes("\\") || !resolved.startsWith("/artifact/")) throw new Error("Unsafe archive link");
         links.set(path, target);
       }
     } catch (error) {
       failure = error instanceof Error ? error : new Error("Invalid archive");
     }
   } });
-  await (0, import_promises3.pipeline)((0, import_node_fs7.createReadStream)(archive), (0, import_node_zlib.createGunzip)(), new import_node_stream2.Transform({ transform(chunk, _encoding, callback) {
+  await (0, import_promises4.pipeline)((0, import_node_fs7.createReadStream)(archive), (0, import_node_zlib.createGunzip)(), new import_node_stream2.Transform({ transform(chunk, _encoding, callback) {
     expandedBytes += chunk.length;
     callback(expandedBytes > maxBytes ? new Error("Expanded artifact exceeds local cache budget") : null, chunk);
   } }), parser);
@@ -3249,15 +3352,16 @@ async function inspect(archive, maxBytes) {
       }
     }
   }
+  return expandedBytes + (count + 4) * 4096;
 }
 async function extract(archive, destination, maxBytes) {
-  const target = (0, import_node_path10.resolve)(destination);
-  await (0, import_promises2.mkdir)((0, import_node_path10.dirname)(target), { recursive: true });
-  await (0, import_promises2.mkdir)(target);
+  const target = (0, import_node_path11.resolve)(destination);
+  await (0, import_promises3.mkdir)((0, import_node_path11.dirname)(target), { recursive: true });
+  await (0, import_promises3.mkdir)(target);
   try {
     await So({ file: archive, cwd: target, strict: true, preservePaths: false });
   } catch (error) {
-    await (0, import_promises2.rm)(target, { recursive: true, force: true });
+    await (0, import_promises3.rm)(target, { recursive: true, force: true });
     throw error;
   }
 }
@@ -3266,9 +3370,9 @@ async function archiveBound(path) {
   let count = 0;
   async function visit(current) {
     if (++count > 1e5) throw new Error("Too many build files");
-    const info = await (0, import_promises2.lstat)(current);
+    const info = await (0, import_promises3.lstat)(current);
     bytes += 8192 + Math.ceil(info.size * 1.01);
-    if (info.isDirectory()) for (const name of await (0, import_promises2.readdir)(current)) await visit((0, import_node_path10.join)(current, name));
+    if (info.isDirectory()) for (const name of await (0, import_promises3.readdir)(current)) await visit((0, import_node_path11.join)(current, name));
     else if (!info.isFile() && !info.isSymbolicLink()) throw new Error("Unsupported build file");
   }
   await visit(path);
@@ -3277,14 +3381,14 @@ async function archiveBound(path) {
 
 // action/setup/auth.ts
 var import_node_fs8 = require("node:fs");
-var import_node_crypto3 = require("node:crypto");
+var import_node_crypto4 = require("node:crypto");
 var escape = (value) => value.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
 var defaultLog = (value) => {
   process.stdout.write(value);
 };
 function fileCommand(path, name, value) {
   if (!path || !/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(name)) throw new Error("Invalid GitHub file command");
-  const delimiter = `layercache_${(0, import_node_crypto3.randomUUID)()}`;
+  const delimiter = `layercache_${(0, import_node_crypto4.randomUUID)()}`;
   (0, import_node_fs8.appendFileSync)(path, `${name}<<${delimiter}
 ${value}
 ${delimiter}
@@ -3326,20 +3430,20 @@ var exchangeTurbo = exchangeCapability;
 
 // native/source.ts
 var import_node_child_process = require("node:child_process");
-var import_node_crypto4 = require("node:crypto");
-var import_promises5 = require("node:fs/promises");
-var import_node_path11 = require("node:path");
+var import_node_crypto5 = require("node:crypto");
+var import_promises6 = require("node:fs/promises");
+var import_node_path12 = require("node:path");
 async function sourceKey(directory) {
   const git = (args) => (0, import_node_child_process.execFileSync)("git", ["-C", directory, ...args], { encoding: "utf8", maxBuffer: 32 * 1024 ** 2 });
   const root = git(["rev-parse", "--show-toplevel"]).trim();
   const files = (0, import_node_child_process.execFileSync)("git", ["-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], { encoding: "utf8", maxBuffer: 32 * 1024 ** 2 });
-  const hash = (0, import_node_crypto4.createHash)("sha256").update("layercache-source-v1\0");
+  const hash = (0, import_node_crypto5.createHash)("sha256").update("layercache-source-v1\0");
   for (const name of [...new Set(files.split("\0").filter(Boolean))].sort()) {
-    const path = (0, import_node_path11.join)(root, name);
+    const path = (0, import_node_path12.join)(root, name);
     let value;
     try {
-      const info = await (0, import_promises5.lstat)(path);
-      if (info.isSymbolicLink()) value = [name, "link", await (0, import_promises5.readlink)(path)];
+      const info = await (0, import_promises6.lstat)(path);
+      if (info.isSymbolicLink()) value = [name, "link", await (0, import_promises6.readlink)(path)];
       else if (info.isFile()) value = [name, "file", info.mode & 73 ? "executable" : "regular", await digestFile(path)];
       else throw new Error("Submodules and special source files need an explicit build key");
     } catch (error) {
@@ -3352,15 +3456,15 @@ async function sourceKey(directory) {
 }
 
 // action/native/main.ts
-var import_node_path13 = require("node:path");
+var import_node_path14 = require("node:path");
 
 // native/expo-identity.ts
-var import_node_crypto5 = require("node:crypto");
+var import_node_crypto6 = require("node:crypto");
 var import_node_child_process2 = require("node:child_process");
 var import_node_util = require("node:util");
 var import_node_module = require("node:module");
-var import_node_path12 = require("node:path");
-var import_promises6 = require("node:fs/promises");
+var import_node_path13 = require("node:path");
+var import_promises7 = require("node:fs/promises");
 function identityForBuild(props, options) {
   if (!options.app) throw new Error("An app identity is required");
   if (!options.compatibility) throw new Error("Resolve the toolchain before creating a native build key");
@@ -3374,7 +3478,7 @@ function identityForBuild(props, options) {
   };
 }
 async function fingerprintForProject(projectRoot) {
-  const project = (0, import_node_module.createRequire)((0, import_node_path12.join)(projectRoot, "package.json"));
+  const project = (0, import_node_module.createRequire)((0, import_node_path13.join)(projectRoot, "package.json"));
   let fingerprint;
   try {
     fingerprint = project("@expo/fingerprint");
@@ -3391,7 +3495,7 @@ function prepareExpoEnvironment(projectRoot) {
   process.env.NODE_ENV ||= "development";
   process.env.BABEL_ENV ||= process.env.NODE_ENV;
   Object.assign(globalThis, { __DEV__: process.env.NODE_ENV !== "production" });
-  const project = (0, import_node_module.createRequire)((0, import_node_path12.join)(projectRoot, "package.json"));
+  const project = (0, import_node_module.createRequire)((0, import_node_path13.join)(projectRoot, "package.json"));
   const expo = (0, import_node_module.createRequire)(project.resolve("expo/package.json"));
   const cli = (0, import_node_module.createRequire)(expo.resolve("@expo/cli/package.json"));
   const env = cli("@expo/env");
@@ -3406,7 +3510,7 @@ function parseSimulatorTarget(value) {
 }
 function simulatorCompatibility(target) {
   parseSimulatorTarget(JSON.stringify(target));
-  const digest = (0, import_node_crypto5.createHash)("sha256").update(JSON.stringify([target.os, target.arch, target.xcode, target.sdk])).digest("hex");
+  const digest = (0, import_node_crypto6.createHash)("sha256").update(JSON.stringify([target.os, target.arch, target.xcode, target.sdk])).digest("hex");
   return `expo-ios-toolchain-v1-${digest}`;
 }
 async function detectSimulatorTarget(projectRoot) {
@@ -3444,11 +3548,11 @@ function assertSimulatorArtifact(metadata, target) {
 async function validateSimulatorApp(path, target) {
   if (process.platform !== "darwin" || !path.endsWith(".app")) throw new Error("Simulator app validation requires macOS and an app directory");
   const execute = async (command, args) => (0, import_node_util.promisify)(import_node_child_process2.execFile)(command, args, { timeout: 15e3, maxBuffer: 1024 ** 2 });
-  const { stdout } = await execute("/usr/bin/plutil", ["-convert", "json", "-o", "-", (0, import_node_path12.join)(path, "Info.plist")]);
+  const { stdout } = await execute("/usr/bin/plutil", ["-convert", "json", "-o", "-", (0, import_node_path13.join)(path, "Info.plist")]);
   const metadata = JSON.parse(stdout);
   if (typeof metadata.CFBundleExecutable !== "string" || !/^[^/\\.][^/\\]*$/.test(metadata.CFBundleExecutable)) throw new Error("Invalid simulator executable");
-  const architectures = await execute("/usr/bin/lipo", ["-archs", (0, import_node_path12.join)(path, metadata.CFBundleExecutable)]);
-  const files = await (0, import_promises6.readdir)(path, { recursive: true });
+  const architectures = await execute("/usr/bin/lipo", ["-archs", (0, import_node_path13.join)(path, metadata.CFBundleExecutable)]);
+  const files = await (0, import_promises7.readdir)(path, { recursive: true });
   assertSimulatorArtifact({
     platforms: metadata.CFBundleSupportedPlatforms,
     architectures: architectures.stdout.trim().split(/\s+/),
@@ -3472,7 +3576,7 @@ async function main() {
   if (mode === "expo") {
     if (operation === "save" && process.platform !== "darwin") throw new Error("Simulator save requires macOS");
     const planned = await planExpoSimulator({
-      projectRoot: (0, import_node_path13.resolve)(process.env.GITHUB_WORKSPACE ?? process.cwd(), input("expo-root") || "."),
+      projectRoot: (0, import_node_path14.resolve)(process.env.GITHUB_WORKSPACE ?? process.cwd(), input("expo-root") || "."),
       project,
       app: input("expo-app"),
       scheme: input("expo-scheme") || void 0,

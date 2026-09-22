@@ -1,6 +1,5 @@
-import { readdir, rm } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -44,19 +43,20 @@ const provider = {
   },
   async resolveBuildCache(props: BuildProps, options: ProviderOptions): Promise<string | null> {
     if (props.runOptions.buildCache === false) return null;
-    const destination = join(props.projectRoot, '.expo', 'layercache', randomUUID());
     try {
       const resolved = await withToolchain(props, options);
-      const result = await client(resolved).restore(identityForBuild(props, resolved), destination);
+      let name: string | undefined;
+      const result = await client(resolved).restoreManaged(identityForBuild(props, resolved), async destination => {
+        const names = await readdir(destination);
+        name = names[0];
+        if (names.length !== 1 || !name || !name.endsWith(props.platform === 'ios' ? '.app' : '.apk')) throw new Error('Unexpected native artifact');
+        if (props.platform === 'ios' && process.platform === 'darwin') await validateSimulatorApp(join(destination, name), await detectSimulatorTarget(props.projectRoot));
+      });
       if (!result.hit) return null;
-      const names = await readdir(destination);
-      const name = names[0];
-      if (names.length !== 1 || !name || !name.endsWith(props.platform === 'ios' ? '.app' : '.apk')) throw new Error('Unexpected native artifact');
-      if (props.platform === 'ios' && process.platform === 'darwin') await validateSimulatorApp(join(destination, name), await detectSimulatorTarget(props.projectRoot));
+      const destination = result.path!;
       console.log(`Layer Cache: ${result.source} hit, ${Math.round(result.elapsedMs)}ms, ${result.bytes} bytes. Native compilation skipped; JS still comes from Metro.`);
-      return join(destination, name);
+      return join(destination, name!);
     } catch {
-      await rm(destination, { recursive: true, force: true });
       warn(); return null;
     }
   },

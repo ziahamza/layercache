@@ -5,6 +5,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile, chmod, utimes, copyFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { NativeCache, artifactKey } from './client.ts';
 import provider, { identityForBuild } from './expo.ts';
 import { detectSimulatorTarget, validateSimulatorApp } from './expo-identity.ts';
@@ -39,6 +40,118 @@ test('project, compatibility and source key each isolate artifacts', async t => 
     assert.notEqual(artifactKey(changed), artifactKey(identity));
     assert.equal((await cache.restore(changed)).hit, false);
   }
+});
+
+test('Expo repeated hits share a process-pinned extraction instead of accumulating worktree copies', async t => {
+  const { root } = await fixture(t);
+  const apk = join(root, 'Client.apk');
+  await writeFile(apk, 'android development binary');
+  const options = { project: identity.project, compatibility: 'android-test', app: 'mobile', cacheDir: join(root, 'cache') };
+  const props = { projectRoot: join(root, 'worktree'), platform: 'android' as const, fingerprintHash: 'a'.repeat(40), runOptions: {} };
+  assert.ok(await provider.uploadBuildCache({ ...props, buildPath: apk }, options));
+  const first = await provider.resolveBuildCache(props, options);
+  const second = await provider.resolveBuildCache(props, options);
+  assert.ok(first);
+  assert.equal(second, first);
+  assert.ok(first.startsWith(options.cacheDir));
+});
+
+test('managed extraction admission includes expanded bytes and preserves live consumers under pressure', async t => {
+  const { root } = await fixture(t);
+  const apk = join(root, 'Client.apk');
+  await writeFile(apk, Buffer.alloc(200_000, 1));
+  const options = { project: identity.project, compatibility: 'android-test', app: 'mobile', cacheDir: join(root, 'cache'), maxBytes: 300_000 };
+  const props = { projectRoot: root, platform: 'android' as const, fingerprintHash: 'a'.repeat(40), runOptions: {} };
+  const other = { ...props, fingerprintHash: 'b'.repeat(40) };
+  assert.ok(await provider.uploadBuildCache({ ...props, buildPath: apk }, options));
+  assert.ok(await provider.uploadBuildCache({ ...other, buildPath: apk }, options));
+  const first = await provider.resolveBuildCache(props, options);
+  assert.ok(first);
+  assert.equal(await provider.resolveBuildCache(other, options), null);
+  assert.equal((await readFile(first)).length, 200_000);
+  assert.equal(await provider.resolveBuildCache(props, options), first);
+});
+
+test('dead process extractions are reclaimed while current process paths remain pinned', async t => {
+  const { cache, app } = await fixture(t);
+  await cache.save(identity, app);
+  const code = `import { NativeCache } from './native/client.ts'; const r = await new NativeCache(${JSON.stringify({ cacheDir: cache.root })}).restoreManaged(${JSON.stringify(identity)}); console.log(r.path);`;
+  const deadPath = execFileSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' }).trim();
+  assert.ok((await stat(deadPath)).isDirectory());
+  const [first, second] = await Promise.all([cache.restoreManaged(identity), cache.restoreManaged(identity)]);
+  assert.equal(first.path, second.path);
+  await assert.rejects(stat(deadPath), { code: 'ENOENT' });
+  assert.equal((await readdir(join(cache.root, 'extractions'))).length, 1);
+});
+
+test('idle eviction preserves the archive backing a live provider path', async t => {
+  const { root } = await fixture(t);
+  const apk = join(root, 'Client.apk');
+  await writeFile(apk, 'android development binary');
+  const options = { project: identity.project, compatibility: 'android-test', app: 'mobile', cacheDir: join(root, 'cache'), maxAgeMs: 1000 };
+  const props = { projectRoot: root, platform: 'android' as const, fingerprintHash: 'a'.repeat(40), runOptions: {} };
+  const archive = await provider.uploadBuildCache({ ...props, buildPath: apk }, options);
+  assert.ok(archive);
+  const first = await provider.resolveBuildCache(props, options);
+  assert.ok(first);
+  await utimes(archive, new Date(1), new Date(1));
+  await new NativeCache(options).save({ ...identity, key: 'unrelated' }, apk);
+  assert.equal(await provider.resolveBuildCache(props, options), first);
+  assert.equal(await readFile(first, 'utf8'), 'android development binary');
+});
+
+test('provider rejection releases a new extraction reservation', async t => {
+  const { root, app } = await fixture(t);
+  const options = { project: identity.project, compatibility: 'android-test', app: 'mobile', cacheDir: join(root, 'cache') };
+  const props = { projectRoot: root, platform: 'android' as const, fingerprintHash: 'a'.repeat(40), runOptions: {} };
+  await new NativeCache(options).save(identityForBuild(props, options), app);
+  assert.equal(await provider.resolveBuildCache(props, options), null);
+  assert.deepEqual(await readdir(join(options.cacheDir, 'extractions')), []);
+});
+
+test('failed revalidation never removes a previously returned live extraction', async t => {
+  const { cache, app } = await fixture(t);
+  await cache.save(identity, app);
+  const first = await cache.restoreManaged(identity);
+  await assert.rejects(cache.restoreManaged(identity, async () => { throw new Error('Rejected by consumer'); }), /Rejected by consumer/);
+  assert.equal(await readFile(join(first.path!, 'Client.app/binary'), 'utf8'), 'native code');
+  assert.equal((await cache.restoreManaged(identity)).path, first.path);
+});
+
+test('capacity eviction keeps the backing archive and rejects admission when all bytes are pinned', async t => {
+  const { root } = await fixture(t);
+  const apk = join(root, 'Client.apk');
+  await writeFile(apk, randomBytes(200_000));
+  const cache = new NativeCache({ cacheDir: join(root, 'cache'), maxBytes: 600_000 });
+  const saved = await cache.save(identity, apk);
+  const first = await cache.restoreManaged(identity);
+  await assert.rejects(cache.save({ ...identity, key: 'other' }, apk), /live Expo consumers are pinned/);
+  assert.ok((await stat(saved.path!)).isFile());
+  assert.equal((await cache.restoreManaged(identity)).path, first.path);
+});
+
+test('saving conflicting content cannot replace a live extraction backing archive', async t => {
+  const { cache, app } = await fixture(t);
+  const saved = await cache.save(identity, app);
+  const first = await cache.restoreManaged(identity);
+  assert.equal((await cache.save(identity, app)).digest, saved.digest);
+  await writeFile(join(app, 'binary'), 'different native code');
+  await assert.rejects(cache.save(identity, app), /live Expo consumers/);
+  const again = await cache.restoreManaged(identity);
+  assert.equal(again.path, first.path);
+  assert.equal(again.digest, saved.digest);
+  assert.equal(await readFile(join(first.path!, 'Client.app/binary'), 'utf8'), 'native code');
+});
+
+test('managed extraction refuses a symlink root without deleting its target', async t => {
+  const { cache, app, root } = await fixture(t);
+  await cache.save(identity, app);
+  const outside = join(root, 'unrelated');
+  await mkdir(outside);
+  await writeFile(join(outside, 'keep'), 'user file');
+  await symlink(outside, join(cache.root, 'extractions'));
+  await assert.rejects(cache.restoreManaged(identity), /Unsafe native extraction/);
+  assert.equal(await readFile(join(outside, 'keep'), 'utf8'), 'user file');
 });
 
 test('corrupt local archive becomes a miss and is removed', async t => {

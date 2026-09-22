@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createGunzip } from 'node:zlib';
 import * as tar from 'tar';
+import { Extractions } from './extractions.ts';
 
 export interface Identity {
   project: string;
@@ -105,11 +106,14 @@ export class NativeCache {
       const info = await stat(path);
       return { path, size: info.size, used: info.mtimeMs };
     }));
-    let bytes = entries.reduce((total, entry) => total + entry.size, 0);
+    const pinned = await new Extractions(join(this.root, 'extractions')).usage();
+    const retained = (path: string) => path === keep || pinned.keys.has(basename(path, '.tgz'));
+    if (pinned.bytes + reserve + entries.filter(entry => retained(entry.path)).reduce((total, entry) => total + entry.size, 0) > this.maxBytes) throw new Error('Insufficient local cache budget: live Expo consumers are pinned');
+    let bytes = entries.reduce((total, entry) => total + entry.size, 0) + pinned.bytes;
     const cutoff = Date.now() - (this.options.maxAgeMs ?? 7 * 86400_000);
     for (const entry of entries.sort((a, b) => a.used - b.used)) {
       if (bytes + reserve <= this.maxBytes && entry.used > cutoff) break;
-      if (entry.path === keep) continue;
+      if (retained(entry.path)) continue;
       await rm(entry.path, { force: true });
       await rm(`${entry.path}.sha256`, { force: true });
       bytes -= entry.size;
@@ -128,9 +132,19 @@ export class NativeCache {
     }
   }
   async restore(identity: Identity, destination?: string): Promise<Result> {
+    return this.restoreInternal(identity, destination);
+  }
+  // The provider returns paths still in use by Expo after this method returns.
+  // Unlike caller-owned destinations, these bytes remain in the cache budget.
+  async restoreManaged(identity: Identity, validate?: (destination: string) => Promise<void>): Promise<Result> {
+    return this.restoreInternal(identity, undefined, true, validate);
+  }
+  private async restoreInternal(identity: Identity, destination?: string, managed = false, validate?: (destination: string) => Promise<void>): Promise<Result> {
     const started = performance.now();
     const key = artifactKey(identity);
     return this.locked(async () => {
+      // Reclaim exited consumers even if this lookup is a miss.
+      await new Extractions(join(this.root, 'extractions')).usage();
       const path = join(this.root, `${key}.tgz`);
       let digest = await this.verified(path);
       let source: Result['source'] = 'local';
@@ -162,8 +176,24 @@ export class NativeCache {
       }
       await this.evict(0, path);
       await utimes(path, new Date(), new Date());
-      await inspect(path, this.maxBytes);
-      if (destination) await extract(path, destination, this.maxBytes);
+      const expanded = await inspect(path, this.maxBytes);
+      if (managed) {
+        const extractions = new Extractions(join(this.root, 'extractions'));
+        const entry = extractions.path(key, digest);
+        if (await extractions.existing(entry)) {
+          destination = join(entry, 'artifact');
+          // A previous caller may still be consuming this path. Revalidation
+          // failure must not remove an extraction already handed to Expo.
+          await validate?.(destination);
+        }
+        else {
+          await this.evict(expanded, path);
+          destination = await extractions.create(entry, key, expanded, async target => {
+            await extract(path, target, this.maxBytes);
+            await validate?.(target);
+          });
+        }
+      } else if (destination) await extract(path, destination, this.maxBytes);
       return { hit: true, source, path: destination ? resolve(destination) : path, digest, bytes: (await stat(path)).size, elapsedMs: performance.now() - started };
     });
   }
@@ -191,6 +221,10 @@ export class NativeCache {
         // Validate link/path/expanded-size rules before publishing anything.
         await inspect(temporary, this.maxBytes);
         const digest = await digestFile(temporary);
+        const pinned = await new Extractions(join(this.root, 'extractions')).usage();
+        if (pinned.keys.has(key) && await digestFile(path) !== digest) {
+          throw new Error('Cannot replace native artifact backing live Expo consumers; use a complete build key');
+        }
         await rename(temporary, path);
         await writeFile(`${path}.sha256`, digest, { mode: 0o600 });
         const url = this.url(identity);
@@ -210,7 +244,7 @@ export class NativeCache {
 
 // Never extract into a checkout or an existing destination. Permit only internal
 // symlinks such as Apple framework Current -> A; reject hard links and special files.
-async function inspect(archive: string, maxBytes: number): Promise<void> {
+async function inspect(archive: string, maxBytes: number): Promise<number> {
   let bytes = 0;
   let count = 0;
   let failure: Error | undefined;
@@ -272,6 +306,10 @@ async function inspect(archive: string, maxBytes: number): Promise<void> {
       }
     }
   }
+  // Include conservative per-entry allocation/metadata overhead, even for many
+  // empty files. Admission happens before extraction; staging uses this same
+  // directory and reservation, never a second unaccounted copy.
+  return expandedBytes + (count + 4) * 4096;
 }
 async function extract(archive: string, destination: string, maxBytes: number): Promise<void> {
   const target = resolve(destination);
