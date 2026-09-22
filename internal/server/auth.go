@@ -190,9 +190,15 @@ func (server *Server) githubOIDCCapabilityExchange(writer http.ResponseWriter, r
 		(identity.Ref != server.config.ActionsDefaultRef || !trustedEvent) {
 		capabilities = []access.Capability{access.CapabilityRead}
 	}
+	runID := "github-actions:" + strings.ToLower(identity.Repository) + ":" + identity.RunID + ":" + identity.RunAttempt
+	if input.Integration == "turbo" {
+		// A summary replaces one job's complete task graph. Matrix jobs must
+		// never reconcile or delete one another's observations and outcomes.
+		runID += ":check:" + identity.CheckRunID
+	}
 	token, err := access.MintCapabilityToken(server.config.LocalToken, access.Claims{
 		Subject: "github-actions:" + identity.Subject, Project: server.config.ProjectID, Integration: input.Integration,
-		RunID:         "github-actions:" + strings.ToLower(identity.Repository) + ":" + identity.RunID + ":" + identity.RunAttempt,
+		RunID:         runID,
 		WorkspaceID:   "github-actions-check:" + strings.ToLower(identity.Repository) + ":" + identity.CheckRunID,
 		Compatibility: input.Compatibility, Repository: strings.ToLower(identity.Repository),
 		Ref: identity.Ref, DefaultRef: server.config.ActionsDefaultRef, SourceCommit: strings.ToLower(identity.Commit),

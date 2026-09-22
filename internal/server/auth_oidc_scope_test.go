@@ -99,6 +99,32 @@ func TestGitHubOIDCCapabilityIsActionsOnly(t *testing.T) {
 		claims.WorkspaceID != "github-actions-check:acme/widget:987654321" {
 		t.Fatalf("OIDC measurement correlation = run %q workspace %q", claims.RunID, claims.WorkspaceID)
 	}
+	for _, integration := range []string{"turbo", "buildkit"} {
+		body, _ := json.Marshal(map[string]string{"project": cfg.ProjectID, "compatibility": "linux-amd64-schema1", "idToken": idToken, "integration": integration})
+		response, err := http.Post(endpoint.URL+"/v1/auth/github-oidc/exchange", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			TeamToken string `json:"teamToken"`
+		}
+		err = json.NewDecoder(response.Body).Decode(&result)
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		issued, err := access.ParseCapabilityToken(cfg.LocalToken, result.TeamToken, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "github-actions:acme/widget:123456789:2"
+		if integration == "turbo" {
+			want += ":check:987654321"
+		}
+		if issued.RunID != want {
+			t.Fatalf("%s runID=%q want %q", integration, issued.RunID, want)
+		}
+	}
 	const publicTarget = ".github/workflows/public-cache.yml#public-cache"
 	publicRecipe, err := publicbuild.MaintainedRecipeDigest(publicbuild.IntegrationActions, publicTarget)
 	if err != nil {

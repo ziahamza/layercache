@@ -45,5 +45,33 @@ workflow filenames are not separately allowlisted. Project members and the cache
 administrator remain trusted writers through their own credentials.
 
 This action does not require Public Builds or a published CLI release. Turbo
-keeps its ordinary local cache. Full Local Cache management and CLI ROI reports
-are provided by `action/setup`.
+keeps its ordinary local cache. Full Local Cache management is provided by
+`action/setup`.
+
+## Build-time reports
+
+Setup enables `TURBO_RUN_SUMMARY=true`. Its post step submits new `.turbo/runs`
+summaries to Team Cache, then prints eligible tasks, hits, misses and estimated
+build time saved in the job log and step summary. The server persists those outcomes for period reports. Turbo
+tasks satisfied by its own workspace cache are not credited to Layer Cache.
+Missing timing stays unknown. These estimates are task/critical-path wall time,
+not CPU savings or a measurement of the whole workflow's elapsed time.
+
+Use the action once per job, after checkout and before Turbo commands. For Turbo
+invoked below the workspace root, set `working-directory` to that workspace-relative
+directory. Multiple Turbo commands at that same root are collected together.
+Summaries from before setup are excluded. Commands overriding summary generation
+or running at other roots are not reported by this action.
+
+The post step obtains fresh GitHub OIDC credentials, so the initial Turbo token's
+lifetime does not limit reporting. The service binds reports to the signed
+repository, workflow run/attempt and check/job ID; matrix jobs cannot replace
+each other's graphs. The submitted payload contains only task identities, graph,
+cache outcome and timing fields, not the summary's environment or command data.
+Team/Public source attribution requires server-observed artifact transfers.
+
+Reports are bounded to 32 new summaries, 4,096 total tasks, 8 MiB input, and a
+24-hour job window. Files must remain within the workspace and may not be
+symlinks. Failed report collection, expired OIDC access or an older server without
+the reporting endpoint produces a warning and does not change the build result.
+Deploy the server update before expecting reports from `action/turbo@main`.
