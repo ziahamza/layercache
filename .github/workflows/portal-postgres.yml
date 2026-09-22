@@ -1,0 +1,49 @@
+name: Portal PostgreSQL
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portal-postgres-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  store-contract:
+    name: Portal store / PostgreSQL 16
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      LAYERCACHE_PORTAL_TEST_POSTGRES_URL: postgres://layercache:portal-qa@127.0.0.1:5432/layercache_portal_test?sslmode=disable
+    services:
+      postgres:
+        # Same immutable PostgreSQL 16 image used for local store validation.
+        image: postgres@sha256:081f1bc7bd5e143dbb6e487b710bbc27712cdcfaced4c071b8e47349aa1b4171
+        env:
+          POSTGRES_DB: layercache_portal_test
+          POSTGRES_USER: layercache
+          POSTGRES_PASSWORD: portal-qa
+        ports:
+          - 5432:5432
+        options: >-
+          --memory 512m
+          --cpus 1
+          --tmpfs /var/lib/postgresql/data:rw,size=256m
+          --health-cmd "pg_isready -U layercache -d layercache_portal_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.25.13'
+          cache: false
+      - name: Verify durable membership, revocation, and concurrent limits
+        run: go test -race ./internal/portal -run '^TestStore' -count=3

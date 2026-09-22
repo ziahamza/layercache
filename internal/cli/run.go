@@ -56,6 +56,8 @@ Usage:
   layercache vm-route issue [options]
   layercache run [options] -- COMMAND [ARG...]
   layercache serve [options]
+  layercache connect --cloud URL [--github-cli] [--team TEAM] [--project PROJECT]
+  layercache serve-cloud --config FILE
   layercache serve-projects --config FILE
 `
 
@@ -74,6 +76,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runDashboard(ctx, args[1:], stdout, stderr)
 	case "setup":
 		return runSetup(ctx, args[1:], stdout, stderr)
+	case "connect":
+		return runConnect(ctx, args[1:], stdout, stderr)
+	case "serve-cloud":
+		return runServeCloud(ctx, args[1:], stderr)
 	case "login":
 		return runLogin(ctx, args[1:], stdout, stderr)
 	case "status":

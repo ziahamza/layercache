@@ -1,0 +1,30 @@
+[Unit]
+Description=Layer Cache self-serve cloud
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/srv/layercache-cloud
+
+[Service]
+Type=simple
+User=layercache
+Group=layercache
+ExecStart=/usr/local/bin/layercache serve-cloud --config /etc/layercache-cloud/config.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+UMask=0077
+ReadWritePaths=/srv/layercache-cloud
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
