@@ -3295,7 +3295,7 @@ function endpointURL(value) {
   if (url.username || url.password || url.search || url.hash || url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname))) throw new Error("Team Cache requires HTTPS, or HTTP on loopback");
   return url;
 }
-async function exchangeTurbo({ endpoint, project, compatibility, minutes, env, fetcher = fetch, log = defaultLog }) {
+async function exchangeCapability({ endpoint, project, compatibility, minutes, env, integration = "turbo", fetcher = fetch, log = defaultLog }) {
   if (!env.ACTIONS_ID_TOKEN_REQUEST_URL || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) throw new Error("Team Cache OIDC needs job permissions id-token: write");
   const oidc = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
   if (oidc.protocol !== "https:") throw new Error("GitHub OIDC request URL must use HTTPS");
@@ -3311,7 +3311,7 @@ async function exchangeTurbo({ endpoint, project, compatibility, minutes, env, f
   const exchanged = await fetcher(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ project, compatibility, idToken: identity.value, integration: "turbo", ttlSeconds: minutes * 60 }),
+    body: JSON.stringify({ project, compatibility, idToken: identity.value, integration, ttlSeconds: minutes * 60 }),
     redirect: "error",
     signal: AbortSignal.timeout(2e4)
   });
@@ -3322,6 +3322,7 @@ async function exchangeTurbo({ endpoint, project, compatibility, minutes, env, f
 `);
   return result;
 }
+var exchangeTurbo = exchangeCapability;
 
 // native/source.ts
 var import_node_child_process = require("node:child_process");

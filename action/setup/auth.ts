@@ -14,8 +14,8 @@ export function endpointURL(value: string): URL {
       (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)))) throw new Error('Team Cache requires HTTPS, or HTTP on loopback');
   return url;
 }
-export async function exchangeTurbo({ endpoint, project, compatibility, minutes, env, fetcher = fetch, log = defaultLog }: {
-  endpoint: string; project: string; compatibility: string; minutes: number; env: NodeJS.ProcessEnv; fetcher?: typeof fetch; log?: (value: string) => void;
+export async function exchangeCapability({ endpoint, project, compatibility, minutes, env, integration = 'turbo', fetcher = fetch, log = defaultLog }: {
+  endpoint: string; project: string; compatibility: string; minutes: number; env: NodeJS.ProcessEnv; integration?: 'turbo' | 'buildkit'; fetcher?: typeof fetch; log?: (value: string) => void;
 }): Promise<{ teamToken: string; expiresAt: string }> {
   if (!env.ACTIONS_ID_TOKEN_REQUEST_URL || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN) throw new Error('Team Cache OIDC needs job permissions id-token: write');
   const oidc = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL);
@@ -29,7 +29,7 @@ export async function exchangeTurbo({ endpoint, project, compatibility, minutes,
   const url = endpointURL(endpoint);
   url.pathname = `${url.pathname.replace(/\/+$/, '').replace(/\/v1$/, '')}/v1/auth/github-oidc/exchange`;
   const exchanged = await fetcher(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ project, compatibility, idToken: identity.value, integration: 'turbo', ttlSeconds: minutes * 60 }), redirect: 'error', signal: AbortSignal.timeout(20_000) });
+    body: JSON.stringify({ project, compatibility, idToken: identity.value, integration, ttlSeconds: minutes * 60 }), redirect: 'error', signal: AbortSignal.timeout(20_000) });
   if (!exchanged.ok) throw new Error(`Turbo OIDC exchange returned HTTP ${exchanged.status}`);
   const result = await exchanged.json() as { teamToken: string; expiresAt: string };
   if (typeof result.teamToken !== 'string' || !result.teamToken || !Number.isFinite(Date.parse(result.expiresAt)) ||
@@ -37,3 +37,4 @@ export async function exchangeTurbo({ endpoint, project, compatibility, minutes,
   log(`::add-mask::${escape(result.teamToken)}\n`);
   return result;
 }
+export const exchangeTurbo = exchangeCapability;

@@ -1,0 +1,36 @@
+name: Layer Cache for BuildKit
+description: Connect Docker BuildKit registry caching using short-lived project-scoped OIDC credentials.
+inputs:
+  team-url:
+    description: HTTPS Team Cache origin.
+    required: true
+  project:
+    description: Project identity, defaults to github.com/owner/repo lowercase.
+  namespace:
+    description: Configured project registry alias.
+    required: true
+  scope:
+    description: Cache name for this Dockerfile and build target.
+    required: true
+  compatibility:
+    description: Explicit artifact ABI, hashed into the cache tag.
+    required: true
+  ttl-minutes:
+    description: Credential lifetime from 1 to 60 minutes; must cover build and cache export.
+    default: '30'
+outputs:
+  enabled:
+    description: Whether authentication and registry login succeeded.
+  registry:
+    description: Registry host.
+  cache-from:
+    description: BuildKit cache import spec, empty when unavailable.
+  cache-to:
+    description: BuildKit cache export spec, empty when unavailable or read-only.
+  expires-at:
+    description: Credential expiration time.
+runs:
+  using: node24
+  main: main.ts
+  post: post.ts
+  post-if: always()
