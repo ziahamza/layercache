@@ -4,17 +4,36 @@
   "license": "MIT",
   "type": "module",
   "main": "native/dist/expo.cjs",
-  "exports": { ".": "./native/dist/expo.cjs", "./client": "./native/dist/client.js" },
-  "bin": { "layercache-native": "native/dist/cli.js" },
-  "files": ["native/dist", "native/README.md", "LICENSE"],
-  "engines": { "node": ">=24" },
+  "exports": {
+    ".": "./native/dist/expo.cjs",
+    "./client": "./native/dist/client.js"
+  },
+  "bin": {
+    "layercache-native": "native/dist/cli.js"
+  },
+  "files": [
+    "native/dist",
+    "native/README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "build": "node native/build.ts",
-    "typecheck": "tsc --noEmit",
+    "build": "node native/build.ts && node dashboard/build.ts",
+    "typecheck": "tsc --noEmit && tsc -p dashboard/tsconfig.json && tsc -p qa/dashboard/tsconfig.json",
     "test": "node --test native/*.test.ts deploy/pool/*.test.ts",
+    "test:dashboard": "node qa/dashboard/run.ts",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
-  "dependencies": { "tar": "7.5.22" },
-  "devDependencies": { "@types/node": "24.13.3", "esbuild": "0.28.2", "typescript": "5.9.3" }
+  "dependencies": {
+    "tar": "7.5.22"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.13.3",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
 }
