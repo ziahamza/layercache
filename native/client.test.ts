@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile, chmod, utimes } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile, chmod, utimes, copyFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NativeCache, artifactKey } from './client.ts';
@@ -145,6 +145,14 @@ test('invalid config and oversized builds are rejected', async t => {
 
 test('Expo provider reuses Debug clients across worktrees but refuses Release fingerprint reuse', async t => {
   const { root, app } = await fixture(t);
+  await mkdir(join(root, 'worktree-one'));
+  await mkdir(join(root, 'worktree-two'));
+  if (process.platform === 'darwin') {
+    // A real Mach-O makes the provider's macOS architecture validation run;
+    // this transport fixture does not claim to be a launchable simulator app.
+    await copyFile('/usr/bin/true', join(app, 'SimulatorFixture'));
+    await writeFile(join(app, 'Info.plist'), '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>SimulatorFixture</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array></dict></plist>');
+  }
   const options = { project: identity.project, compatibility: identity.compatibility, app: 'mobile', cacheDir: join(root, 'cache') };
   const props = { projectRoot: join(root, 'worktree-one'), platform: 'ios' as const, fingerprintHash: 'a'.repeat(40), runOptions: {} };
   assert.ok(await provider.uploadBuildCache({ ...props, buildPath: app }, options));

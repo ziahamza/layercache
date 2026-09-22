@@ -3286,18 +3286,113 @@ async function sourceKey(directory) {
 }
 
 // native/cli.ts
+import { resolve as resolve2 } from "node:path";
+
+// native/expo-identity.ts
+import { createHash as createHash3 } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { createRequire } from "node:module";
+import { join as join3 } from "node:path";
+function identityForBuild(props, options) {
+  if (!options.app) throw new Error("An app identity is required");
+  if (!options.compatibility) throw new Error("Resolve the toolchain before creating a native build key");
+  const configuration = props.platform === "ios" ? props.runOptions.configuration ?? "Debug" : props.runOptions.variant ?? "debug";
+  if (configuration !== (props.platform === "ios" ? "Debug" : "debug")) throw new Error("Only development clients support native-fingerprint reuse");
+  if (!/^[a-f0-9]{16,128}$/.test(props.fingerprintHash)) throw new Error("Invalid Expo fingerprint");
+  return {
+    project: options.project,
+    compatibility: options.compatibility,
+    key: JSON.stringify(["expo-dev-v1", options.app, props.platform, configuration, props.runOptions.scheme ?? "", props.fingerprintHash])
+  };
+}
+async function fingerprintForProject(projectRoot) {
+  const project = createRequire(join3(projectRoot, "package.json"));
+  let fingerprint;
+  try {
+    fingerprint = project("@expo/fingerprint");
+  } catch {
+    const expo = createRequire(project.resolve("expo/package.json"));
+    const cli = createRequire(expo.resolve("@expo/cli/package.json"));
+    fingerprint = cli("@expo/fingerprint");
+  }
+  const result = await fingerprint.createFingerprintAsync(projectRoot);
+  if (typeof result.hash !== "string" || !/^[a-f0-9]{16,128}$/.test(result.hash)) throw new Error("Invalid Expo fingerprint");
+  return result.hash;
+}
+function prepareExpoEnvironment(projectRoot) {
+  process.env.NODE_ENV ||= "development";
+  process.env.BABEL_ENV ||= process.env.NODE_ENV;
+  Object.assign(globalThis, { __DEV__: process.env.NODE_ENV !== "production" });
+  const project = createRequire(join3(projectRoot, "package.json"));
+  const expo = createRequire(project.resolve("expo/package.json"));
+  const cli = createRequire(expo.resolve("@expo/cli/package.json"));
+  const env = cli("@expo/env");
+  if (typeof env.loadProjectEnv === "function") env.loadProjectEnv(projectRoot, { silent: true, mode: process.env.NODE_ENV, systemEnv: process.env });
+  else if (typeof env.load === "function") env.load(projectRoot, { silent: true });
+  else throw new Error("Unsupported installed Expo environment loader");
+}
+function parseSimulatorTarget(value) {
+  const target = JSON.parse(value);
+  if (!target || target.os !== "darwin" || !["arm64", "x64"].includes(target.arch ?? "") || typeof target.xcode !== "string" || !/^Xcode [^\r\n]+\nBuild version [^\r\n]+$/.test(target.xcode) || typeof target.sdk !== "string" || !/^[a-zA-Z0-9.]+$/.test(target.sdk) || Object.keys(target).sort().join(",") !== "arch,os,sdk,xcode") throw new Error("Invalid simulator target");
+  return target;
+}
+function simulatorCompatibility(target) {
+  parseSimulatorTarget(JSON.stringify(target));
+  const digest = createHash3("sha256").update(JSON.stringify([target.os, target.arch, target.xcode, target.sdk])).digest("hex");
+  return `expo-ios-toolchain-v1-${digest}`;
+}
+async function detectSimulatorTarget(projectRoot) {
+  if (process.platform !== "darwin") throw new Error("Simulator toolchain requires macOS");
+  const execute = async (command, args) => promisify(execFile)(command, args, { cwd: projectRoot, timeout: 15e3, maxBuffer: 1024 ** 2 });
+  const xcode = await execute("xcodebuild", ["-version"]);
+  const sdk = await execute("xcrun", ["--sdk", "iphonesimulator", "--show-sdk-build-version"]);
+  return parseSimulatorTarget(JSON.stringify({ os: process.platform, arch: process.arch, xcode: xcode.stdout.trim(), sdk: sdk.stdout.trim() }));
+}
+function verifySimulatorTarget(expected, actual) {
+  if (simulatorCompatibility(expected) !== simulatorCompatibility(actual)) throw new Error("Simulator toolchain differs from declared target");
+}
+async function planExpoSimulator(options) {
+  if (!options.project) throw new Error("A project identity is required");
+  if (process.platform === "darwin") verifySimulatorTarget(options.target, await detectSimulatorTarget(options.projectRoot));
+  prepareExpoEnvironment(options.projectRoot);
+  const identity = identityForBuild(
+    {
+      projectRoot: options.projectRoot,
+      platform: "ios",
+      fingerprintHash: await fingerprintForProject(options.projectRoot),
+      runOptions: { configuration: "Debug", scheme: options.scheme }
+    },
+    { ...options, compatibility: simulatorCompatibility(options.target) }
+  );
+  if (options.expectedKey && options.expectedKey !== identity.key || options.expectedCompatibility && options.expectedCompatibility !== identity.compatibility) throw new Error("Expo identity differs from declared identity");
+  return identity;
+}
+
+// native/cli.ts
 async function main() {
   const [operation, ...args] = process.argv.slice(2);
   if (operation === "key" && args.length === 0) {
     console.log(await sourceKey(process.cwd()));
     return;
   }
+  if (operation === "expo-target" && args.length === 0) {
+    console.log(JSON.stringify(await detectSimulatorTarget(process.cwd())));
+    return;
+  }
   const values = {};
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
-    if (!flag || !["--project", "--compatibility", "--key", "--path", "--cache-dir", "--max-bytes"].includes(flag) || !value || flag in values) throw new Error("Invalid arguments");
+    const flags = operation === "expo-key" ? ["--project", "--app", "--root", "--scheme", "--target"] : ["--project", "--compatibility", "--key", "--path", "--cache-dir", "--max-bytes"];
+    if (!flag || !flags.includes(flag) || !value || flag in values) throw new Error("Invalid arguments");
     values[flag] = value;
+  }
+  if (operation === "expo-key") {
+    const projectRoot = resolve2(values["--root"] ?? ".");
+    const target = values["--target"] ? parseSimulatorTarget(values["--target"]) : await detectSimulatorTarget(projectRoot);
+    console.log(JSON.stringify(await planExpoSimulator({ projectRoot, project: values["--project"] ?? "", app: values["--app"] ?? "", scheme: values["--scheme"], target })));
+    return;
   }
   const identity = { project: values["--project"] ?? "", compatibility: values["--compatibility"] ?? "", key: values["--key"] ?? "" };
   const options = {

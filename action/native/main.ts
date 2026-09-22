@@ -1,19 +1,33 @@
 import { NativeCache } from '../../native/client.ts';
 import { exchangeTurbo, fileCommand } from '../setup/auth.ts';
 import { sourceKey } from '../../native/source.ts';
+import { resolve } from 'node:path';
+import { planExpoSimulator, parseSimulatorTarget, validateSimulatorApp } from '../../native/expo-identity.ts';
 
 async function main(): Promise<void> {
   const input = (name: string) => (process.env[`INPUT_${name.toUpperCase()}`] ?? '').trim();
   const project = input('project') || `github.com/${process.env.GITHUB_REPOSITORY ?? ''}`.toLowerCase();
-  const compatibility = input('compatibility');
-  const key = input('key') || await sourceKey(process.env.GITHUB_WORKSPACE ?? process.cwd());
   const operation = input('operation') || 'restore';
   const output = (name: string, value: string) => fileCommand(process.env.GITHUB_OUTPUT, name, value);
   // Fail open only to a real build, never to a false cache hit.
   output('cache-hit', 'false');
   output('source', 'degraded');
-  output('key', key);
   if (!['restore', 'save'].includes(operation)) throw new Error('Invalid operation');
+  const mode = input('key-mode') || 'source';
+  if (!['source', 'expo'].includes(mode)) throw new Error('Invalid key mode');
+  let compatibility = input('compatibility');
+  let key = input('key');
+  if (mode === 'expo') {
+    if (operation === 'save' && process.platform !== 'darwin') throw new Error('Simulator save requires macOS');
+    const planned = await planExpoSimulator({ projectRoot: resolve(process.env.GITHUB_WORKSPACE ?? process.cwd(), input('expo-root') || '.'),
+      project, app: input('expo-app'), scheme: input('expo-scheme') || undefined, target: parseSimulatorTarget(input('expo-target')),
+      expectedKey: key, expectedCompatibility: compatibility });
+    key = planned.key;
+    compatibility = planned.compatibility;
+    if (operation === 'save') await validateSimulatorApp(input('path'), parseSimulatorTarget(input('expo-target')));
+  } else key ||= await sourceKey(process.env.GITHUB_WORKSPACE ?? process.cwd());
+  output('key', key);
+  output('compatibility', compatibility);
   const credentials = await exchangeTurbo({ endpoint: input('team-url'), project, compatibility, minutes: 60, env: process.env });
   const cache = new NativeCache({ endpoint: input('team-url'), token: credentials.teamToken, maxBytes: Number(input('max-bytes') || 5 * 1024 ** 3) });
   const result = operation === 'save'

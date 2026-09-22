@@ -34,13 +34,12 @@ __export(expo_exports, {
   identityForBuild: () => identityForBuild
 });
 module.exports = __toCommonJS(expo_exports);
-var import_promises5 = require("node:fs/promises");
-var import_node_path11 = require("node:path");
-var import_node_crypto3 = require("node:crypto");
+var import_promises6 = require("node:fs/promises");
+var import_node_path12 = require("node:path");
 var import_node_crypto4 = require("node:crypto");
-var import_node_child_process = require("node:child_process");
-var import_node_util = require("node:util");
-var import_node_module = require("node:module");
+var import_node_crypto5 = require("node:crypto");
+var import_node_child_process2 = require("node:child_process");
+var import_node_util2 = require("node:util");
 
 // native/client.ts
 var import_node_crypto2 = require("node:crypto");
@@ -3300,7 +3299,13 @@ async function archiveBound(path) {
   return bytes;
 }
 
-// native/expo.ts
+// native/expo-identity.ts
+var import_node_crypto3 = require("node:crypto");
+var import_node_child_process = require("node:child_process");
+var import_node_util = require("node:util");
+var import_node_module = require("node:module");
+var import_node_path11 = require("node:path");
+var import_promises5 = require("node:fs/promises");
 function identityForBuild(props, options) {
   if (!options.app) throw new Error("An app identity is required");
   if (!options.compatibility) throw new Error("Resolve the toolchain before creating a native build key");
@@ -3313,14 +3318,65 @@ function identityForBuild(props, options) {
     key: JSON.stringify(["expo-dev-v1", options.app, props.platform, configuration, props.runOptions.scheme ?? "", props.fingerprintHash])
   };
 }
+async function fingerprintForProject(projectRoot) {
+  const project = (0, import_node_module.createRequire)((0, import_node_path11.join)(projectRoot, "package.json"));
+  let fingerprint;
+  try {
+    fingerprint = project("@expo/fingerprint");
+  } catch {
+    const expo = (0, import_node_module.createRequire)(project.resolve("expo/package.json"));
+    const cli = (0, import_node_module.createRequire)(expo.resolve("@expo/cli/package.json"));
+    fingerprint = cli("@expo/fingerprint");
+  }
+  const result = await fingerprint.createFingerprintAsync(projectRoot);
+  if (typeof result.hash !== "string" || !/^[a-f0-9]{16,128}$/.test(result.hash)) throw new Error("Invalid Expo fingerprint");
+  return result.hash;
+}
+function parseSimulatorTarget(value) {
+  const target = JSON.parse(value);
+  if (!target || target.os !== "darwin" || !["arm64", "x64"].includes(target.arch ?? "") || typeof target.xcode !== "string" || !/^Xcode [^\r\n]+\nBuild version [^\r\n]+$/.test(target.xcode) || typeof target.sdk !== "string" || !/^[a-zA-Z0-9.]+$/.test(target.sdk) || Object.keys(target).sort().join(",") !== "arch,os,sdk,xcode") throw new Error("Invalid simulator target");
+  return target;
+}
+function simulatorCompatibility(target) {
+  parseSimulatorTarget(JSON.stringify(target));
+  const digest = (0, import_node_crypto3.createHash)("sha256").update(JSON.stringify([target.os, target.arch, target.xcode, target.sdk])).digest("hex");
+  return `expo-ios-toolchain-v1-${digest}`;
+}
+async function detectSimulatorTarget(projectRoot) {
+  if (process.platform !== "darwin") throw new Error("Simulator toolchain requires macOS");
+  const execute = async (command, args) => (0, import_node_util.promisify)(import_node_child_process.execFile)(command, args, { cwd: projectRoot, timeout: 15e3, maxBuffer: 1024 ** 2 });
+  const xcode = await execute("xcodebuild", ["-version"]);
+  const sdk = await execute("xcrun", ["--sdk", "iphonesimulator", "--show-sdk-build-version"]);
+  return parseSimulatorTarget(JSON.stringify({ os: process.platform, arch: process.arch, xcode: xcode.stdout.trim(), sdk: sdk.stdout.trim() }));
+}
+function assertSimulatorArtifact(metadata, target) {
+  if (!Array.isArray(metadata.platforms) || metadata.platforms.length !== 1 || metadata.platforms[0] !== "iPhoneSimulator") throw new Error("Only iOS simulator apps can be cached with Expo identity");
+  const arch = target.arch === "x64" ? "x86_64" : "arm64";
+  if (!metadata.architectures.includes(arch)) throw new Error("Simulator app architecture differs from declared target");
+  if (metadata.embeddedJavaScript) throw new Error("Embedded JavaScript cannot use development fingerprint reuse");
+}
+async function validateSimulatorApp(path, target) {
+  if (process.platform !== "darwin" || !path.endsWith(".app")) throw new Error("Simulator app validation requires macOS and an app directory");
+  const execute = async (command, args) => (0, import_node_util.promisify)(import_node_child_process.execFile)(command, args, { timeout: 15e3, maxBuffer: 1024 ** 2 });
+  const { stdout } = await execute("/usr/bin/plutil", ["-convert", "json", "-o", "-", (0, import_node_path11.join)(path, "Info.plist")]);
+  const metadata = JSON.parse(stdout);
+  if (typeof metadata.CFBundleExecutable !== "string" || !/^[^/\\.][^/\\]*$/.test(metadata.CFBundleExecutable)) throw new Error("Invalid simulator executable");
+  const architectures = await execute("/usr/bin/lipo", ["-archs", (0, import_node_path11.join)(path, metadata.CFBundleExecutable)]);
+  const files = await (0, import_promises5.readdir)(path, { recursive: true });
+  assertSimulatorArtifact({
+    platforms: metadata.CFBundleSupportedPlatforms,
+    architectures: architectures.stdout.trim().split(/\s+/),
+    embeddedJavaScript: files.some((file) => /(?:^|\/)main\.jsbundle$/.test(file))
+  }, target);
+}
+
+// native/expo.ts
 async function withToolchain(props, options) {
   if (options.compatibility) return options;
-  const execute = async (command, args) => (0, import_node_util.promisify)(import_node_child_process.execFile)(command, args, { cwd: props.projectRoot, timeout: 15e3, maxBuffer: 1024 ** 2 });
+  const execute = async (command, args) => (0, import_node_util2.promisify)(import_node_child_process2.execFile)(command, args, { cwd: props.projectRoot, timeout: 15e3, maxBuffer: 1024 ** 2 });
   let parts;
   if (props.platform === "ios") {
-    const xcode = await execute("xcodebuild", ["-version"]);
-    const sdk = await execute("xcrun", ["--sdk", "iphonesimulator", "--show-sdk-build-version"]);
-    parts = [xcode.stdout.trim(), sdk.stdout.trim()];
+    return { ...options, compatibility: simulatorCompatibility(await detectSimulatorTarget(props.projectRoot)) };
   } else {
     const java = await execute("java", ["-version"]);
     const serial = typeof props.runOptions.device === "string" ? ["-s", props.runOptions.device] : [];
@@ -3328,7 +3384,7 @@ async function withToolchain(props, options) {
     if (!abi) throw new Error("Cannot identify Android target ABI");
     parts = [java.stdout.trim(), java.stderr.trim(), abi];
   }
-  const digest = (0, import_node_crypto4.createHash)("sha256").update(JSON.stringify([process.platform, process.arch, ...parts])).digest("hex");
+  const digest = (0, import_node_crypto5.createHash)("sha256").update(JSON.stringify([process.platform, process.arch, ...parts])).digest("hex");
   return { ...options, compatibility: `expo-${props.platform}-toolchain-v1-${digest}` };
 }
 function client(options) {
@@ -3338,43 +3394,36 @@ var warn = () => console.warn("Layer Cache native reuse unavailable; Expo will b
 var provider = {
   async calculateFingerprintHash(props) {
     try {
-      const project = (0, import_node_module.createRequire)((0, import_node_path11.join)(props.projectRoot, "package.json"));
-      let fingerprint;
-      try {
-        fingerprint = project("@expo/fingerprint");
-      } catch {
-        const expo = (0, import_node_module.createRequire)(project.resolve("expo/package.json"));
-        const cli = (0, import_node_module.createRequire)(expo.resolve("@expo/cli/package.json"));
-        fingerprint = cli("@expo/fingerprint");
-      }
-      const result = await fingerprint.createFingerprintAsync(props.projectRoot);
-      if (typeof result.hash !== "string" || !/^[a-f0-9]{16,128}$/.test(result.hash)) throw new Error("Invalid Expo fingerprint");
-      return result.hash;
+      return await fingerprintForProject(props.projectRoot);
     } catch {
       warn();
       return null;
     }
   },
   async resolveBuildCache(props, options) {
-    const destination = (0, import_node_path11.join)(props.projectRoot, ".expo", "layercache", (0, import_node_crypto3.randomUUID)());
+    if (props.runOptions.buildCache === false) return null;
+    const destination = (0, import_node_path12.join)(props.projectRoot, ".expo", "layercache", (0, import_node_crypto4.randomUUID)());
     try {
       const resolved = await withToolchain(props, options);
       const result = await client(resolved).restore(identityForBuild(props, resolved), destination);
       if (!result.hit) return null;
-      const names = await (0, import_promises5.readdir)(destination);
+      const names = await (0, import_promises6.readdir)(destination);
       const name = names[0];
       if (names.length !== 1 || !name || !name.endsWith(props.platform === "ios" ? ".app" : ".apk")) throw new Error("Unexpected native artifact");
+      if (props.platform === "ios" && process.platform === "darwin") await validateSimulatorApp((0, import_node_path12.join)(destination, name), await detectSimulatorTarget(props.projectRoot));
       console.log(`Layer Cache: ${result.source} hit, ${Math.round(result.elapsedMs)}ms, ${result.bytes} bytes. Native compilation skipped; JS still comes from Metro.`);
-      return (0, import_node_path11.join)(destination, name);
+      return (0, import_node_path12.join)(destination, name);
     } catch {
-      await (0, import_promises5.rm)(destination, { recursive: true, force: true });
+      await (0, import_promises6.rm)(destination, { recursive: true, force: true });
       warn();
       return null;
     }
   },
   async uploadBuildCache(props, options) {
+    if (props.runOptions.buildCache === false) return null;
     try {
       if (!props.buildPath.endsWith(props.platform === "ios" ? ".app" : ".apk")) throw new Error("Only simulator apps and development APKs are supported");
+      if (props.platform === "ios" && process.platform === "darwin") await validateSimulatorApp(props.buildPath, await detectSimulatorTarget(props.projectRoot));
       const resolved = await withToolchain(props, options);
       const result = await client(resolved).save(identityForBuild(props, resolved), props.buildPath);
       console.log(`Layer Cache: native build cached, ${Math.round(result.elapsedMs)}ms, ${result.bytes} bytes.`);
