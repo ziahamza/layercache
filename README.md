@@ -66,6 +66,17 @@ The default compatibility identity includes OS and architecture, detected libc o
 
 Setup supports previews, interactive confirmation, and explicit `--non-interactive` operation. `layercache login` uses GitHub device authorization, keeps refresh material in macOS Keychain or Linux Secret Service, and persists only short-lived project capabilities in the owner-only configuration. If no supported credential manager is available, login fails instead of writing refresh material to disk.
 
+Engineers already signed into GitHub CLI can instead use
+`layercache login --github-cli --config /path/to/project-config.json`.
+Layer Cache asks `gh auth token --hostname github.com` for the existing identity
+and exchanges it for project-scoped capabilities. The GitHub credential stays
+with `gh`; it is never copied into Layer Cache configuration. The absolute `gh`
+executable path is recorded for automatic refresh while the daemon runs. Run
+`gh auth login` first, and rerun Layer Cache login if that executable moves.
+Changing the configured Team URL or project clears this authorization choice.
+Use separate configurations, data directories and listen ports for different
+projects; compatible clones and worktrees of one project can share a daemon.
+
 Useful lifecycle commands:
 
 ```bash
