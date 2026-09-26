@@ -14,8 +14,64 @@ const errors:string[]=[];for(const page of [alice,bob])page.on('pageerror',error
 const results:{name:string;passed:boolean;error?:string}[]=[];
 async function check(name:string,fn:()=>Promise<void>){try{await fn();results.push({name,passed:true});}catch(error){results.push({name,passed:false,error:error instanceof Error?error.message:String(error)});await alice.screenshot({path:path.join(output,name.replace(/\W/g,'-')+'.png'),fullPage:true});throw error;}}
 async function login(page:Page,user:string){await page.goto(origin);await page.getByRole('link',{name:'Continue with GitHub'}).click();await page.getByRole('link',{name:'Sign in as '+user}).click();await page.getByText('@'+user,{exact:true}).first().waitFor();}
+async function callbackLink(page:Page,user:string){await page.goto(origin);await page.getByRole('link',{name:'Continue with GitHub'}).click();const link=await page.getByRole('link',{name:'Sign in as '+user}).getAttribute('href');assert.ok(link);return new URL(link,page.url());}
 function form(page:Page,title:string){return page.locator('form').filter({has:page.getByRole('heading',{name:title,exact:true})});}
 try{
+ await check('OAuth provider refuses an unknown client ID',async()=>{const context=await browser.newContext();try{const page=await context.newPage();await page.goto(origin);await page.getByRole('link',{name:'Continue with GitHub'}).click();const authorization=new URL(page.url());authorization.searchParams.set('client_id','unknown-client');const response=await page.goto(authorization.href);assert.equal(response?.status(),400);assert.equal((await page.request.get(origin+'/api/session')).status(),401);}finally{await context.close();}});
+ await check('tampered OAuth state cannot sign in and fresh login recovers',async()=>{
+  const context=await browser.newContext();
+  try{
+   const page=await context.newPage(),callback=await callbackLink(page,'alice');
+   callback.searchParams.set('state','0'.repeat(48));
+   assert.equal((await page.goto(callback.href))?.status(),403);
+   assert.equal((await page.request.get(origin+'/api/session')).status(),401);
+   await login(page,'alice');
+   const session=await page.request.get(origin+'/api/session');
+   assert.equal(session.status(),200);
+   assert.equal((await session.json()).user.login,'alice');
+  }finally{await context.close();}
+ });
+ await check('changed OAuth PKCE challenge cannot sign in',async()=>{
+  const context=await browser.newContext();
+  try{
+   const page=await context.newPage();
+   await page.goto(origin);
+   await page.getByRole('link',{name:'Continue with GitHub'}).click();
+   const authorization=new URL(page.url());
+   authorization.searchParams.set('code_challenge','A'.repeat(43));
+   await page.goto(authorization.href);
+   const link=await page.getByRole('link',{name:'Sign in as alice'}).getAttribute('href');
+   assert.ok(link);
+   assert.equal((await page.goto(link))?.status(),403);
+   assert.equal((await page.request.get(origin+'/api/session')).status(),401);
+  }finally{await context.close();}
+ });
+ await check('OAuth callback cannot cross browser contexts',async()=>{
+  const first=await browser.newContext(),second=await browser.newContext();
+  try{
+   const firstPage=await first.newPage(),secondPage=await second.newPage();
+   await callbackLink(firstPage,'alice');
+   const secondCallback=await callbackLink(secondPage,'bob');
+   assert.equal((await firstPage.goto(secondCallback.href))?.status(),403);
+   assert.equal((await firstPage.request.get(origin+'/api/session')).status(),401);
+   await secondPage.goto(secondCallback.href);
+   const session=await secondPage.request.get(origin+'/api/session');
+   assert.equal(session.status(),200);
+   assert.equal((await session.json()).user.login,'bob');
+  }finally{await first.close();await second.close();}
+ });
+ await check('OAuth callback cannot be replayed after sign-out',async()=>{
+  const context=await browser.newContext();
+  try{
+   const page=await context.newPage(),callback=await callbackLink(page,'alice');
+   await page.goto(callback.href);
+   await page.getByText('@alice',{exact:true}).first().waitFor();
+   await page.getByRole('button',{name:'Sign out',exact:true}).click();
+   await page.getByRole('link',{name:'Continue with GitHub'}).waitFor();
+   assert.equal((await page.goto(callback.href))?.status(),403);
+   assert.equal((await page.request.get(origin+'/api/session')).status(),401);
+  }finally{await context.close();}
+ });
  await check('OAuth PKCE login two independent identities',async()=>{await login(alice,'alice');await login(bob,'bob');assert.equal(await alice.getByText('@bob',{exact:true}).count(),0);});
  await check('non-creator can sign in but cannot create a team',async()=>{assert.equal(await bob.getByRole('button',{name:'Create team',exact:true}).count(),0);await bob.getByText('Team creation is limited to invited beta creators.',{exact:false}).waitFor();const session=await bob.request.get(origin+'/api/session');assert.equal(session.status(),200);const info=await session.json() as {csrfToken:string;canCreateTeam:boolean};assert.equal(info.canCreateTeam,false);const denied=await bob.request.post(origin+'/api/teams',{headers:{Origin:origin,'X-CSRF-Token':info.csrfToken},data:{name:'Unauthorized'}});assert.equal(denied.status(),403);assert.match((await denied.json()).error,/invited beta creators/);});
  await check('create team from empty workspace',async()=>{const f=form(alice,'New team');await f.getByLabel('Team name').fill('Acme engineering');await f.getByRole('button',{name:'Create team',exact:true}).click();await alice.getByText('Team created.',{exact:true}).waitFor();await alice.getByRole('heading',{name:'Add your first project'}).waitFor();});
