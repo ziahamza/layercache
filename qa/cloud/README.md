@@ -3,6 +3,9 @@
 This suite launches the real `serve-cloud` CLI against isolated configuration and
 storage. A local Node HTTP server acts as GitHub for authorization redirects,
 PKCE token exchange, stable user identity, and repository administration checks.
+It validates the configured OAuth client ID, exact callback, and requested scope;
+the real cloud rejects altered state, a mismatched PKCE challenge, callbacks sent
+to another browser, and callback replay after sign-out.
 The fake provider exists only in this QA fixture; no production authentication
 bypass is added.
 
@@ -28,6 +31,9 @@ repository administration denial, project provisioning, an actual cache upload,
 an actual `layercache connect --github-cli` run with isolated fake `gh`, CLI instructions, targeted invitations, reader/writer roles, session reload,
 report periods, four viewport sizes, last-admin protection, member removal,
 logout, and expired-session recovery.
+OAuth failure checks use disposable browser contexts and verify that rejected
+callbacks do not create sessions. A fresh sign-in after a tampered state also
+verifies recovery without restarting the service.
 
 The storage-pool fixture marks a private directory on the host filesystem and
 sets its configured ceiling to that filesystem's reported size. This exercises
