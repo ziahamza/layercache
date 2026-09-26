@@ -32,8 +32,11 @@ checksum verification,
 `help`, and `setup --preview --json`. The installed binary SHA-256 was
 `e8fb1449792978e4df1e3110ff7a1bb35da83a476050cf12797e41ea65015b18`.
 The [release workflow](https://github.com/ziahamza/layercache/actions/runs/36222806673)
-also passed native Linux arm64 and macOS arm64 qualification; the fresh installer
-check was on Linux x64. A separate post-publication download verified all six
-release assets: each platform archive matched its SHA-256 manifest, contained
+also passed native Linux arm64 and macOS arm64 qualification. The
+[published-binary installer workflow](https://github.com/ziahamza/layercache/actions/runs/36223675118)
+then passed on fresh GitHub-hosted Linux x64, Linux arm64, and macOS arm64 runners.
+Each job checked the immutable release, exact tag source commit, installer
+verification, `help`, and setup preview. A separate post-publication download
+verified all six release assets: each platform archive matched its SHA-256 manifest, contained
 exactly one member, and both archive and manifest attestations matched the beta
 tag and source commit above.
