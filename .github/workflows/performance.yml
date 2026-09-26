@@ -40,11 +40,20 @@ jobs:
             --turbo "$GITHUB_WORKSPACE/qa/fixtures/$FIXTURE/node_modules/.bin/turbo" \
             --sources local,team --samples 11 \
             --output "$RUNNER_TEMP/layercache-performance.json"
+      - name: Prove two-user cloud Turbo restore through the CLI
+        if: matrix.fixture == 'turbo'
+        env:
+          LAYERCACHE_BIN: ${{ runner.temp }}/layercache-performance
+          TURBO_BIN: ${{ github.workspace }}/qa/fixtures/turbo/node_modules/.bin/turbo
+          QA_OUTPUT: ${{ runner.temp }}/cloud-turbo-evidence
+        run: node qa/cloud/turbo-restore.ts
       - name: Preserve measurements and reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cache-performance-${{ matrix.fixture }}-${{ github.sha }}
-          path: ${{ runner.temp }}/layercache-performance.json
+          path: |
+            ${{ runner.temp }}/layercache-performance.json
+            ${{ runner.temp }}/cloud-turbo-evidence/turbo-restore.json
           if-no-files-found: warn
           retention-days: 30
