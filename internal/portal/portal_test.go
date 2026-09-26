@@ -22,15 +22,16 @@ import (
 )
 
 type portalQA struct {
-	t         *testing.T
-	p         *Portal
-	cfg       Config
-	github    *httptest.Server
-	mu        sync.Mutex
-	challenge string
-	admin     bool
-	revoked   bool
-	exchanges int
+	t              *testing.T
+	p              *Portal
+	cfg            Config
+	github         *httptest.Server
+	mu             sync.Mutex
+	challenge      string
+	admin          bool
+	revoked        bool
+	exchanges      int
+	tokenExpiresIn int64
 }
 
 func signPortalOIDCTestToken(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
@@ -141,7 +142,11 @@ func newPortalQA(t *testing.T) *portalQA {
 				http.Error(w, "bad PKCE exchange", 400)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "github-" + r.Form.Get("code")})
+			response := map[string]any{"access_token": "github-" + r.Form.Get("code")}
+			if q.tokenExpiresIn > 0 {
+				response["expires_in"] = q.tokenExpiresIn
+			}
+			_ = json.NewEncoder(w).Encode(response)
 		case r.URL.Path == "/user":
 			if q.revoked {
 				http.Error(w, "revoked", 401)
@@ -350,6 +355,32 @@ func TestPortalOAuthStatePKCEReplayAndSessionCSRF(t *testing.T) {
 	requireStatus(t, q.request("GET", "/api/session", "", nil, nil), 401)
 	q.team(b, "Allowed")
 	requireStatus(t, q.request("POST", "/api/logout", "", b, nil), 204)
+	requireStatus(t, q.request("GET", "/api/session", "", b, nil), 401)
+}
+
+func TestPortalBrowserSessionEndsBeforeExpiringGitHubToken(t *testing.T) {
+	q := newPortalQA(t)
+	q.tokenExpiresIn = 3600
+	cookie, query := q.begin()
+	response := q.request("GET", "/auth/callback?state="+query.Get("state")+"&code=alice", "", &browserQA{cookie: cookie}, nil)
+	requireStatus(t, response, 303)
+	for _, issued := range response.Result().Cookies() {
+		if strings.HasSuffix(issued.Name, "_session") {
+			if issued.MaxAge <= 0 || issued.MaxAge >= 3600 {
+				t.Fatalf("browser session cookie lifetime = %d seconds; provider token expires in 3600 seconds", issued.MaxAge)
+			}
+			requireStatus(t, q.request("GET", "/api/session", "", &browserQA{cookie: issued}, nil), 200)
+			return
+		}
+	}
+	t.Fatal("OAuth callback did not issue a browser session cookie")
+}
+
+func TestPortalRejectsSessionAfterGitHubTokenLifetime(t *testing.T) {
+	q := newPortalQA(t)
+	q.tokenExpiresIn = 62
+	b := q.login("alice")
+	time.Sleep(3 * time.Second)
 	requireStatus(t, q.request("GET", "/api/session", "", b, nil), 401)
 }
 func TestPortalProjectPermissionsAndSecretProjection(t *testing.T) {

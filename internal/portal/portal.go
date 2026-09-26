@@ -341,10 +341,24 @@ func (p *Portal) finishLogin(w http.ResponseWriter, r *http.Request) {
 	defer response.Body.Close()
 	var token struct {
 		AccessToken string `json:"access_token"`
+		ExpiresIn   *int64 `json:"expires_in"`
 	}
 	if response.StatusCode != 200 || json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&token) != nil || token.AccessToken == "" {
 		fail(w, ErrDenied)
 		return
+	}
+	// GitHub OAuth Apps can issue eight-hour access tokens. A browser session
+	// must not remain valid after its stored provider token has expired.
+	sessionSeconds := int64(12 * 60 * 60)
+	if token.ExpiresIn != nil {
+		const expiryMarginSeconds = int64(60)
+		if *token.ExpiresIn <= expiryMarginSeconds {
+			fail(w, ErrDenied)
+			return
+		}
+		if remaining := *token.ExpiresIn - expiryMarginSeconds; remaining < sessionSeconds {
+			sessionSeconds = remaining
+		}
 	}
 	identity, err := githubauth.VerifyUser(r.Context(), p.cfg.GitHubAPIURL, token.AccessToken)
 	if err != nil {
@@ -357,12 +371,12 @@ func (p *Portal) finishLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionToken := randomID("")
-	session := Session{User: user, CSRF: randomID(""), EncryptedToken: p.encrypt(token.AccessToken), ExpiresAt: time.Now().Add(12 * time.Hour).Unix()}
+	session := Session{User: user, CSRF: randomID(""), EncryptedToken: p.encrypt(token.AccessToken), ExpiresAt: time.Now().Add(time.Duration(sessionSeconds) * time.Second).Unix()}
 	if err = p.store.SaveSession(r.Context(), sessionToken, session); err != nil {
 		fail(w, err)
 		return
 	}
-	p.cookie(w, "session", sessionToken, 12*3600)
+	p.cookie(w, "session", sessionToken, int(sessionSeconds))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 func (p *Portal) sessionInfo(w http.ResponseWriter, r *http.Request, session Session) {
