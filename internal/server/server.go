@@ -93,6 +93,9 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 // are not reconciled when this authority is supplied.
 type ProjectAuthority interface {
 	MemberRole(context.Context, string, string) (string, error)
+	// RepositoryID is the original immutable GitHub repository identity captured
+	// when an administrator provisioned the managed project.
+	RepositoryID(context.Context, string) (string, error)
 }
 
 func NewWithProjectAuthority(ctx context.Context, cfg config.Config, authority ProjectAuthority) (*Server, error) {

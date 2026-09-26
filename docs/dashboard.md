@@ -1,8 +1,9 @@
 # CLI-connected team dashboard
 
-The first dashboard slice reads existing Local Cache and Team Cache connections
-through the CLI. It supports multiple projects and live cache visibility. It is
-not yet a hosted self-serve account, machine-management, or runner service.
+The CLI dashboard reads existing Local Cache and Team Cache connections through
+the CLI. It supports multiple projects and live cache visibility. The separate
+[self-serve cloud service](self-serve-cloud.md) implements hosted teams and
+projects; its public deployment is a separate launch gate.
 
 Build the CLI normally, then run:
 
@@ -73,10 +74,8 @@ followed, and the browser cannot supply upstream endpoints or project selectors.
 
 ## Next hosted slices
 
-1. Add durable team ownership, browser sign-in, project discovery, and provisioning.
-   Existing gateway projects are operator-configured and membership is reconciled
-   at startup; dynamic membership must have one durable source of truth before
-   self-serve project/member writes are offered.
+1. Launch and qualify the implemented service with real GitHub OAuth, a bounded
+   deployment, an installable CLI, and an independent fresh-runner cache restore.
 2. Enroll CLI machines with explicit team/project authorization, revocable machine
    identities, bounded heartbeats and usage reports. Show last-seen and stale
    state, then add approved cache-policy management. A CLI configuration or daemon
@@ -86,8 +85,8 @@ followed, and the browser cannot supply upstream endpoints or project selectors.
    controlled-publication contract; they are not the private runner scheduler.
 
 The existing cache data path and artifact identity remain reusable across these
-slices. The hosted dashboard should consume authorized project projections,
-with browser sessions checked server-side, instead of exposing cache credentials.
+slices. The hosted dashboard consumes authorized project projections and checks
+browser sessions server-side without exposing cache credentials.
 
 ## Development
 

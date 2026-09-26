@@ -152,6 +152,19 @@ func (server *Server) githubOIDCCapabilityExchange(writer http.ResponseWriter, r
 		server.writeCapabilityExchangeFailure(writer, request)
 		return
 	}
+	if server.projectAuthority != nil {
+		// Managed projects bind the GitHub repository's numeric identity at
+		// provisioning. A recycled owner/name must not inherit old cache bytes.
+		if identity.RepositoryID == "" {
+			server.writeCapabilityExchangeFailure(writer, request)
+			return
+		}
+		storedID, err := server.projectAuthority.RepositoryID(request.Context(), server.config.ProjectID)
+		if err != nil || storedID != identity.RepositoryID {
+			server.writeCapabilityExchangeFailure(writer, request)
+			return
+		}
+	}
 	recipe, platform, toolchain, builder := "", "", "", ""
 	validPublicIdentity := true
 	if input.Integration == "actions" {

@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -129,6 +130,10 @@ func New(ctx context.Context, cfg Config) (*Portal, error) {
 		return nil, err
 	}
 	for _, project := range projects {
+		if !validRepositoryID(project.RepositoryID) {
+			p.Close()
+			return nil, fmt.Errorf("managed project %s lacks its original GitHub repository ID; back up portal metadata, then restore the original numeric ID from a trusted record or provision a fresh portal database (never infer it from the current repository name)", project.ID)
+		}
 		if err = p.ensureProject(ctx, project); err != nil {
 			p.Close()
 			return nil, errors.New("restore managed project runtime")
@@ -443,17 +448,18 @@ func (p *Portal) createProject(w http.ResponseWriter, r *http.Request, session S
 		return
 	}
 	var repository struct {
+		ID            int64  `json:"id"`
 		FullName      string `json:"full_name"`
 		DefaultBranch string `json:"default_branch"`
 		Permissions   struct {
 			Admin bool `json:"admin"`
 		} `json:"permissions"`
 	}
-	if err = p.githubGET(r.Context(), token, "/repos/"+input.Repository, &repository); err != nil || !repository.Permissions.Admin || !strings.EqualFold(repository.FullName, input.Repository) || repository.DefaultBranch == "" || strings.ContainsAny(repository.DefaultBranch, "\x00\r\n") {
+	if err = p.githubGET(r.Context(), token, "/repos/"+input.Repository, &repository); err != nil || repository.ID <= 0 || !repository.Permissions.Admin || !strings.EqualFold(repository.FullName, input.Repository) || repository.DefaultBranch == "" || strings.ContainsAny(repository.DefaultBranch, "\x00\r\n") {
 		jsonResponse(w, 403, map[string]string{"error": "GitHub repository administrator access is required; sign in again if access changed"})
 		return
 	}
-	project, err := p.store.CreateProject(r.Context(), session.User.ID, r.PathValue("team"), strings.TrimSpace(input.Name), input.Repository, "refs/heads/"+repository.DefaultBranch)
+	project, err := p.store.CreateProject(r.Context(), session.User.ID, r.PathValue("team"), strings.TrimSpace(input.Name), input.Repository, strconv.FormatInt(repository.ID, 10), "refs/heads/"+repository.DefaultBranch)
 	if err != nil {
 		fail(w, err)
 		return
