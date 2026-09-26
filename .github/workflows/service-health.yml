@@ -26,3 +26,11 @@ jobs:
         env:
           HEALTH_URL: ${{ vars.LAYERCACHE_PUBLIC_HEALTH_URL }}
         run: node deploy/pool/monitor.ts --public "$HEALTH_URL"
+      - name: Diagnose public probe transport failure
+        if: failure()
+        env:
+          HEALTH_URL: ${{ vars.LAYERCACHE_PUBLIC_HEALTH_URL }}
+        run: |
+          host="$(node -e 'console.log(new URL(process.env.HEALTH_URL).hostname)')"
+          getent ahosts "$host" || true
+          curl --verbose --silent --show-error --head --connect-timeout 5 --max-time 8 "$HEALTH_URL" || true
