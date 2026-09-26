@@ -550,12 +550,17 @@ func rollbackBuildkitApplication(
 }
 
 func listBuildxBuilders(ctx context.Context, dockerCommand string) (map[string]buildxBuilderRecord, error) {
-	command := exec.CommandContext(ctx, dockerCommand, "buildx", "ls", "--timeout", "3s", "--format", "json")
+	listCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	command := exec.CommandContext(listCtx, dockerCommand, "buildx", "ls", "--format", "json")
 	var stdout bytes.Buffer
 	var stderr limitedBuffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
+		if listCtx.Err() != nil {
+			return nil, fmt.Errorf("list BuildKit builders: %w", listCtx.Err())
+		}
 		return nil, fmt.Errorf("list BuildKit builders: %s", commandFailure(err, stderr.String()))
 	}
 	builders := make(map[string]buildxBuilderRecord)

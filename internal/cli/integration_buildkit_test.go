@@ -11,6 +11,46 @@ import (
 	"github.com/layercache/layercache/internal/config"
 )
 
+func TestListBuildxBuildersSupportsMinimumClientWithoutTimeoutFlag(t *testing.T) {
+	directory := t.TempDir()
+	dockerCommand := filepath.Join(directory, "docker")
+	commandLog := filepath.Join(directory, "commands.log")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$LC_BUILDX_COMMAND_LOG"
+if [ "$1" != buildx ] || [ "$2" != ls ]; then
+  exit 2
+fi
+if [ "$3" = --timeout ]; then
+  printf 'unknown flag: --timeout\n' >&2
+  exit 125
+fi
+if [ "$3" != --format ] || [ "$4" != json ]; then
+  exit 2
+fi
+printf '{"Name":"default","Driver":"docker","Current":true,"Nodes":[{"Name":"default","Status":"running"}]}\n'
+`
+	if err := os.WriteFile(dockerCommand, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LC_BUILDX_COMMAND_LOG", commandLog)
+
+	builders, err := listBuildxBuilders(context.Background(), dockerCommand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := builders["default"]; got.Name != "default" || got.Driver != "docker" || !got.Current || !builderHasNode(got, "default") {
+		t.Fatalf("minimum-client builder discovery = %#v", got)
+	}
+	commands, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "buildx ls --format json\n"
+	if string(commands) != want {
+		t.Fatalf("Buildx discovery commands = %q, want %q", commands, want)
+	}
+}
+
 func TestInspectOwnedBuildkitConfigurationReportsFileDrift(t *testing.T) {
 	t.Parallel()
 
