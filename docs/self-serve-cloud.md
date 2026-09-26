@@ -1,11 +1,11 @@
 # Self-serve cloud
 
-The hosted service lets a GitHub user create a team, invite teammates, add repository projects, inspect cache storage and activity, and connect an existing CLI. Projects reuse the existing Team Cache protocols and isolate artifacts with distinct project identities and signing keys.
+The hosted beta lets an approved GitHub user create a team, invite teammates, add repository projects, inspect cache storage and activity, and connect an existing CLI. Other signed-in users can accept invitations and use their teams. Projects reuse the existing Team Cache protocols and isolate artifacts with distinct project identities and signing keys.
 
 ## Engineer workflow
 
 1. Open the service origin and continue with GitHub.
-2. Create a team, then add a project using `owner/repository`. You must administer that GitHub repository. This prevents registering another repository to obtain its GitHub Actions identity.
+2. If the operator approved your GitHub user ID as a beta creator, create a team, then add a project using `owner/repository`. You must administer that GitHub repository. Other users can join through an invitation. This prevents registering another repository to obtain its GitHub Actions identity.
 3. Copy the project's CLI command. With an existing GitHub CLI sign-in:
 
    ```sh
@@ -50,7 +50,11 @@ openssl rand 32 > /etc/layercache-cloud/session-key
 
 The template supplies each project's quota and cache options. Project ID, repository, signing secret, data directory, and membership come from the cloud service. Optional existing `cloudPostgresUrl`/S3 template settings enable the established PostgreSQL/object-storage cache backend. Without those settings cache metadata and artifacts live in the bounded filesystem. Team/session metadata uses SQLite unless `postgresUrlFile` supplies a dedicated PostgreSQL database connection. Keep database and object-storage capacity bounded separately when they are external to this filesystem.
 
-Store the OAuth secret in `/etc/layercache-cloud/github-client-secret` without printing it. Config, template, and secret files must have owner-only permissions. Copy [the example config](../deploy/cloud/config.example.json), replace the hostname/client ID/paths and limits, and run:
+Store the OAuth secret in `/etc/layercache-cloud/github-client-secret` without printing it. Config, template, and secret files must have owner-only permissions. Copy [the example config](../deploy/cloud/config.example.json) and replace the hostname, client ID, paths, and limits.
+
+Set `teamCreatorIds` to one or more canonical decimal GitHub user IDs as JSON strings, for example `["12345678"]`. Get the intended creator's stable numeric ID from GitHub's authenticated `GET /user` response; GitHub usernames may change. The service rejects missing, empty, duplicate, nonnumeric, zero, and noncanonical IDs at startup. Only listed IDs may create teams, regardless of browser UI state. Everyone else may still sign in, accept invitations, and use existing teams. Updating the list requires editing the protected config and restarting the service. Keep admission limited while team capacity and billing are manual.
+
+Then run:
 
 ```sh
 layercache serve-cloud --config /etc/layercache-cloud/config.json

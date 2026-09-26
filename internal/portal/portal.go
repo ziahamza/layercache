@@ -47,6 +47,7 @@ type Config struct {
 	GitHubAPIURL       string
 	GitHubAuthorizeURL string
 	GitHubTokenURL     string
+	TeamCreatorIDs     []string
 	ProjectTemplate    config.Config
 	StoragePool        server.StoragePoolConfig
 }
@@ -59,6 +60,27 @@ type Portal struct {
 	mux       *http.ServeMux
 	authority string
 	secure    bool
+	creators  map[string]struct{}
+}
+
+// ValidateTeamCreatorIDs keeps beta admission bound to GitHub's immutable
+// numeric identity, not a username that another account can later claim.
+func ValidateTeamCreatorIDs(ids []string) error {
+	if len(ids) == 0 {
+		return errors.New("cloud requires at least one teamCreatorIds GitHub user ID")
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		parsed, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || parsed <= 0 || strconv.FormatInt(parsed, 10) != id {
+			return errors.New("teamCreatorIds must contain canonical positive numeric GitHub user IDs")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return errors.New("teamCreatorIds must not contain duplicate GitHub user IDs")
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
 }
 
 func ValidateOrigin(value string) error {
@@ -70,6 +92,9 @@ func ValidateOrigin(value string) error {
 }
 func New(ctx context.Context, cfg Config) (*Portal, error) {
 	if err := ValidateOrigin(cfg.Origin); err != nil {
+		return nil, err
+	}
+	if err := ValidateTeamCreatorIDs(cfg.TeamCreatorIDs); err != nil {
 		return nil, err
 	}
 	if !filepath.IsAbs(cfg.DataDir) || len(cfg.SessionKey) != 32 || cfg.GitHubClientID == "" || cfg.GitHubClientSecret == "" {
@@ -118,7 +143,11 @@ func New(ctx context.Context, cfg Config) (*Portal, error) {
 		return nil, err
 	}
 	origin, _ := url.Parse(cfg.Origin)
-	p := &Portal{cfg: cfg, store: store, aead: aead, authority: origin.Host, secure: origin.Scheme == "https", mux: http.NewServeMux(), client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	creators := make(map[string]struct{}, len(cfg.TeamCreatorIDs))
+	for _, id := range cfg.TeamCreatorIDs {
+		creators[id] = struct{}{}
+	}
+	p := &Portal{cfg: cfg, store: store, aead: aead, authority: origin.Host, secure: origin.Scheme == "https", creators: creators, mux: http.NewServeMux(), client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	p.gateway, err = server.NewProjectGateway(ctx, server.ProjectGatewayConfig{Origin: cfg.Origin, Authority: store, StoragePool: cfg.StoragePool})
 	if err != nil {
 		store.Close()
@@ -352,7 +381,8 @@ func (p *Portal) sessionInfo(w http.ResponseWriter, r *http.Request, session Ses
 		fail(w, err)
 		return
 	}
-	jsonResponse(w, 200, map[string]any{"user": session.User, "csrfToken": session.CSRF, "teams": teams, "projects": projects, "invitations": invitations, "cloudOrigin": p.cfg.Origin})
+	_, canCreateTeam := p.creators[session.User.ID]
+	jsonResponse(w, 200, map[string]any{"user": session.User, "csrfToken": session.CSRF, "teams": teams, "projects": projects, "invitations": invitations, "cloudOrigin": p.cfg.Origin, "canCreateTeam": canCreateTeam})
 }
 func (p *Portal) cliProjects(w http.ResponseWriter, r *http.Request) {
 	values := r.Header.Values("Authorization")
@@ -392,6 +422,10 @@ func (p *Portal) logout(w http.ResponseWriter, r *http.Request, session Session)
 	w.WriteHeader(204)
 }
 func (p *Portal) createTeam(w http.ResponseWriter, r *http.Request, session Session) {
+	if _, allowed := p.creators[session.User.ID]; !allowed {
+		jsonResponse(w, http.StatusForbidden, map[string]string{"error": "team creation is limited to invited beta creators"})
+		return
+	}
 	var input struct {
 		Name string `json:"name"`
 	}

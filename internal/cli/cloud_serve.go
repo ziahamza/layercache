@@ -29,6 +29,7 @@ type cloudFile struct {
 	DataDir                string                   `json:"dataDir"`
 	PostgresURLFile        string                   `json:"postgresUrlFile,omitempty"`
 	GitHubClientID         string                   `json:"githubClientId"`
+	TeamCreatorIDs         []string                 `json:"teamCreatorIds"`
 	GitHubClientSecretFile string                   `json:"githubClientSecretFile"`
 	SessionKeyFile         string                   `json:"sessionKeyFile"`
 	ProjectTemplateFile    string                   `json:"projectTemplateFile"`
@@ -55,6 +56,9 @@ func loadCloud(path string) (cloudFile, portal.Config, error) {
 		return file, cfg, errors.New("cloud must listen on loopback behind a TLS gateway")
 	}
 	if err = portal.ValidateOrigin(file.Origin); err != nil {
+		return file, cfg, err
+	}
+	if err = portal.ValidateTeamCreatorIDs(file.TeamCreatorIDs); err != nil {
 		return file, cfg, err
 	}
 	for _, p := range []string{file.DataDir, file.GitHubClientSecretFile, file.SessionKeyFile, file.ProjectTemplateFile} {
@@ -93,6 +97,7 @@ func loadCloud(path string) (cloudFile, portal.Config, error) {
 	cfg.Origin = file.Origin
 	cfg.DataDir = file.DataDir
 	cfg.GitHubClientID = file.GitHubClientID
+	cfg.TeamCreatorIDs = file.TeamCreatorIDs
 	cfg.StoragePool = file.StoragePool
 	return file, cfg, nil
 }

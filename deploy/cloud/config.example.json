@@ -3,6 +3,7 @@
   "origin": "https://cloud.example.com",
   "dataDir": "/srv/layercache-cloud/data",
   "githubClientId": "REPLACE_WITH_GITHUB_OAUTH_APP_CLIENT_ID",
+  "teamCreatorIds": ["REPLACE_WITH_NUMERIC_GITHUB_USER_ID"],
   "githubClientSecretFile": "/etc/layercache-cloud/github-client-secret",
   "sessionKeyFile": "/etc/layercache-cloud/session-key",
   "projectTemplateFile": "/etc/layercache-cloud/project-template.json",
