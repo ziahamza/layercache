@@ -113,11 +113,7 @@ func (client DeviceClient) Poll(ctx context.Context, device DeviceCode) (Session
 		case "authorization_pending":
 			continue
 		case "slow_down":
-			increase := time.Duration(response.Interval) * time.Second
-			if increase <= 0 {
-				increase = 5 * time.Second
-			}
-			interval += increase
+			interval = nextDevicePollInterval(interval, response.Interval)
 			continue
 		case "expired_token":
 			return Session{}, errors.New("GitHub device authorization expired")
@@ -138,6 +134,19 @@ func (client DeviceClient) Poll(ctx context.Context, device DeviceCode) (Session
 			return Session{}, fmt.Errorf("GitHub device authorization failed: %s", detail)
 		}
 	}
+}
+
+func nextDevicePollInterval(current time.Duration, serverSeconds int64) time.Duration {
+	// A slow_down response adds five seconds to the previous minimum. Its
+	// interval field, when present, is the new minimum, not an increment.
+	next := current + 5*time.Second
+	if serverSeconds > 0 {
+		serverMinimum := time.Duration(serverSeconds) * time.Second
+		if serverMinimum > next {
+			next = serverMinimum
+		}
+	}
+	return next
 }
 
 func (client DeviceClient) Refresh(ctx context.Context, session Session) (Session, error) {
