@@ -9,6 +9,7 @@ export interface ProjectProbe { name: string; configFile: string; configOwnerUID
 export interface PublicProbe { name: string; url: string }
 export interface ProbeResult {
   name: string; issues: string[];
+  diagnostic?: string;
   pool?: { usedBytes: number; availableBytes: number; hardBytes: number; hostAvailableBytes: number };
   report?: { runs: number; hits: number; eligible: number; hitRate: number | null; netEstimatedBuildTimeSavedMS: number | null; timingKnown: number; timingTotal: number };
 }
@@ -23,7 +24,9 @@ export async function probePublic(probe: PublicProbe): Promise<ProbeResult> {
         const socket = response.socket;
         const expiry = socket instanceof TLSSocket ? Date.parse(socket.getPeerCertificate().valid_to) : NaN;
         if (response.statusCode !== 200 || !Number.isFinite(expiry)) {
-          response.destroy(); reject(new Error('invalid-health')); return;
+          response.destroy();
+          reject(new Error(response.statusCode !== 200 ? `http-${response.statusCode}` : 'certificate-unavailable'));
+          return;
         }
         let bytes = 0;
         response.on('data', (chunk: Buffer) => { bytes += chunk.length; if (bytes > 64 * 1024) response.destroy(new Error('body-limit')); });
@@ -35,7 +38,18 @@ export async function probePublic(probe: PublicProbe): Promise<ProbeResult> {
       request.on('error', reject);
     });
     if (expires - Date.now() < 14 * 86400_000) result.issues.push('certificate-expires-within-14-days');
-  } catch { result.issues.push('public-probe-failed'); }
+  } catch (error) {
+    result.issues.push('public-probe-failed');
+    // Keep the public URL and raw error message out of the monitoring result.
+    // Stable, bounded categories let the external runner distinguish DNS,
+    // transport, TLS, and HTTP failures without disclosing request details.
+    if (error instanceof Error) {
+      const code = 'code' in error && typeof error.code === 'string' ? error.code : error.message;
+      if (/^(?:E[A-Z0-9_]+|ERR_[A-Z0-9_]+|UNABLE_TO_VERIFY_LEAF_SIGNATURE|DEPTH_ZERO_SELF_SIGNED_CERT|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID)$/.test(code) && code.length <= 64) result.diagnostic = code;
+      else if (/^http-[1-5][0-9]{2}$/.test(code) || ['timeout', 'unsafe-url', 'certificate-unavailable', 'body-limit'].includes(code)) result.diagnostic = code;
+      else result.diagnostic = 'unknown';
+    }
+  }
   return result;
 }
 

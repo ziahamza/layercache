@@ -29,8 +29,12 @@ test('authenticated project probe reports maintenance failure without exposing c
 });
 
 test('public probe refuses plaintext and reports TLS connection failures without leaking URL queries', async () => {
-  assert.deepEqual(await probePublic({ name: 'plaintext', url: 'http://127.0.0.1/healthz' }), { name: 'plaintext', issues: ['public-probe-failed'] });
-  assert.deepEqual(await probePublic({ name: 'offline', url: 'https://127.0.0.1:1/healthz?secret=hidden' }), { name: 'offline', issues: ['public-probe-failed'] });
+  assert.deepEqual(await probePublic({ name: 'plaintext', url: 'http://127.0.0.1/healthz' }), { name: 'plaintext', issues: ['public-probe-failed'], diagnostic: 'unsafe-url' });
+  const offline = await probePublic({ name: 'offline', url: 'https://127.0.0.1:1/healthz?secret=hidden' });
+  assert.deepEqual(offline, { name: 'offline', issues: ['public-probe-failed'], diagnostic: 'unsafe-url' });
+  assert.ok(!JSON.stringify(offline).includes('hidden'));
+  const refused = await probePublic({ name: 'refused', url: 'https://127.0.0.1:1/healthz' });
+  assert.deepEqual(refused, { name: 'refused', issues: ['public-probe-failed'], diagnostic: 'ECONNREFUSED' });
 });
 
 test('external probe CLI exits nonzero with bounded safe JSON on unhealthy endpoint', () => {
@@ -40,6 +44,7 @@ test('external probe CLI exits nonzero with bounded safe JSON on unhealthy endpo
   assert.equal(report.healthy, false);
   assert.equal(report.delivery, 'github-actions-or-caller');
   assert.deepEqual(report.checks[0].issues, ['public-probe-failed']);
+  assert.equal(report.checks[0].diagnostic, 'unsafe-url');
   assert.ok(!result.stdout.includes('hidden'));
 });
 
