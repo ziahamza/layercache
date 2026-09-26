@@ -35,6 +35,35 @@ pool-aware provisioning and cache writes without requiring privileged mounts; it
 does **not** prove a physically bounded production volume or disk exhaustion.
 WebKit exercises Safari's engine, not the native Safari application on macOS/iOS.
 
+## Two-user Turbo restore
+
+The browser suite checks real CLI connection and a direct artifact upload. The
+separate Turbo acceptance run proves that a cache-aware build crosses user and
+Workspace boundaries. Install the pinned Turbo client, then run this against a
+built CLI or a published installed binary:
+
+```sh
+pnpm --dir qa/fixtures/turbo install --frozen-lockfile
+LAYERCACHE_BIN=/absolute/path/to/layercache \
+TURBO_BIN="$PWD/qa/fixtures/turbo/node_modules/.bin/turbo" \
+node qa/cloud/turbo-restore.ts
+```
+
+It signs in two emulated GitHub users to an isolated loopback cloud, creates a
+team and repository project, invites the second user as a reader, and connects
+two separate CLI configurations. The pinned Turbo client builds in Alice's
+fresh Git clone, then Bob restores from another clone after Alice's Local Cache
+daemon stops. The assertions require one actual task execution, native Turbo
+`MISS` then `REMOTE HIT`, positive uploaded/downloaded byte counts, a Team Cache
+source in the Layer Cache report, identical output SHA-256, and denial of Bob's
+previous capability after removal. Evidence is written to `turbo-restore.json`
+in `QA_OUTPUT` or a fresh temporary evidence directory. The CI performance job
+runs this against the candidate binary and preserves that JSON.
+
+The GitHub provider and cloud hostname are emulated. This test does not replace
+an external HTTPS deployment, GitHub's real OAuth service, or an independent
+customer machine on the public network.
+
 ## PostgreSQL contract
 
 Portal PostgreSQL CI runs the store contract against a pinned, disposable
