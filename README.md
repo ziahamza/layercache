@@ -2,9 +2,19 @@
 
 Layer Cache reuses build work across short-lived worktrees, clones, VMs, and CI jobs. A local daemon owns a bounded content-addressed cache, speaks native cache protocols, and can fall back to a shared Team Cache or a verified Public Cache.
 
-This repository contains working implementations for Turborepo, GitHub Actions cache v1, and Docker Buildx/BuildKit. It includes local persistence, project-scoped PostgreSQL/S3 cloud persistence, signed Public Cache reads, and a Linux KVM/QEMU Public Build worker. An immutable CLI release has not yet been published. npm/CDN mirrors, Bazel, Vite, Next.js, Xcode, Windows, Actions cache v2, and a general adapter SDK remain out of scope.
+This repository contains working implementations for Turborepo, GitHub Actions cache v1, and Docker Buildx/BuildKit. It includes local persistence, project-scoped PostgreSQL/S3 cloud persistence, signed Public Cache reads, and a Linux KVM/QEMU Public Build worker. The first immutable CLI prerelease, [v0.1.0-beta.1](https://github.com/ziahamza/layercache/releases/tag/v0.1.0-beta.1), covers Team Cache use. Public Builds are not qualified by this beta, and the hosted self-serve cloud requires a separate deployment. npm/CDN mirrors, Bazel, Vite, Next.js, Xcode, Windows, Actions cache v2, and a general adapter SDK remain out of scope.
 
-Release and deployment instructions are in the [verified installer](scripts/README.md), [GitHub runner setup](action/setup/README.md), and [Team Cache deployment guide](docs/deployment.md). See [quota administration](docs/cache-administration.md), [retention policies](docs/retention.md), [trust-key rotation](docs/public-trust.md), and [performance qualification](docs/performance.md) for operations. Native platform execution and an immutable published release remain qualification gates; checked-in workflows alone do not establish a release.
+Release and deployment instructions are in the [verified installer](scripts/README.md), [GitHub runner setup](action/setup/README.md), and [Team Cache deployment guide](docs/deployment.md). See [quota administration](docs/cache-administration.md), [retention policies](docs/retention.md), [trust-key rotation](docs/public-trust.md), and [performance qualification](docs/performance.md) for operations. The beta release qualifies native Local/Team Cache clients; it does not establish a hosted cloud service or qualify Public Builds.
+
+To install the beta from an inspected checkout of commit `bd84aee3b6064403e0ce51e6f5dda7599b768c3a`:
+
+```bash
+bash scripts/install.sh --repository ziahamza/layercache \
+  --version v0.1.0-beta.1 --prefix "$HOME/.local/bin"
+"$HOME/.local/bin/layercache" help
+```
+
+The installer requires `gh`, `jq`, `tar`, and `shasum`; it checks the immutable release, attestations, and archive checksum before replacing a binary. See the [installation guide](scripts/README.md) for supported platforms and authentication.
 
 ## Cache model
 
@@ -119,7 +129,7 @@ permissions:
   id-token: write
 steps:
   # Check out the project, configure Node/pnpm, and install dependencies first.
-  - uses: ziahamza/layercache/action/turbo@main
+  - uses: ziahamza/layercache/action/turbo@bd84aee3b6064403e0ce51e6f5dda7599b768c3a
     with:
       team-url: https://cache.example.com
       compatibility: linux-amd64-node24-schema1
@@ -127,8 +137,8 @@ steps:
 ```
 
 Use your Team Cache origin and a compatibility identity for your build toolchain.
-The server must authorize your repository. `main` intentionally tracks current
-code until versioning is introduced. Public action source does not grant access
+The server must authorize your repository. This action is pinned to the beta's
+source commit. Public action source does not grant access
 to anyone else's Team Cache. See the [publication checklist](docs/open-source-preparation.md)
 for the remaining source-publication gates.
 

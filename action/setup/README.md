@@ -11,17 +11,17 @@ permissions:
   id-token: write
 steps:
   - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-  - uses: OWNER/layercache/action/setup@FULL_COMMIT_SHA
+  - uses: ziahamza/layercache/action/setup@bd84aee3b6064403e0ce51e6f5dda7599b768c3a
     id: layercache
     with:
-      repository: OWNER/layercache
-      version: v0.1.0
+      repository: ziahamza/layercache
+      version: v0.1.0-beta.1
       team-url: https://cache.example.com
       compatibility: linux-amd64-node24-schema1
       max-size: '5368709120'
   - run: pnpm install --frozen-lockfile
   - run: pnpm exec turbo run build
-  - uses: OWNER/layercache/action/cache@FULL_COMMIT_SHA
+  - uses: ziahamza/layercache/action/cache@bd84aee3b6064403e0ce51e6f5dda7599b768c3a
     with:
       endpoint: https://cache.example.com
       project: ${{ steps.layercache.outputs.project }}
@@ -30,11 +30,14 @@ steps:
       key: next-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
 ```
 
-`OWNER`, the commit, and the release are placeholders until the repository and
-first immutable release are published. The installer needs Bash, `gh`, `jq`,
+The action and release are pinned to the first immutable Team Cache CLI beta.
+Replace `https://cache.example.com` with your separately provisioned Team Cache
+origin; this example does not imply a hosted cloud service is live. Public Builds
+are not qualified by this beta. The installer needs Bash, `gh`, `jq`,
 `tar`, and `shasum`, available on the supported GitHub hosted runners. The action
-uses Node 24 and supports native Linux amd64/arm64 and macOS arm64. For validation
-before publication, set `binary` to the absolute path of a trusted built CLI.
+uses Node 24 and supports native Linux amd64/arm64 and macOS arm64. For local
+validation without a release download, set `binary` to the absolute path of a
+trusted built CLI.
 That explicitly bypasses release download and provenance verification.
 
 The Team Cache must authorize the workflow repository. Setup exchanges GitHub
