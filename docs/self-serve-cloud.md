@@ -42,13 +42,16 @@ Create the service account and configuration directory first. Run the following 
 
 ```sh
 umask 077
-layercache init --config /etc/layercache-cloud/project-template.json \
+layercache setup --non-interactive --config /etc/layercache-cloud/project-template.json \
   --role team --project cloud-template \
-  --data-dir /srv/layercache-cloud/template --max-size 1073741824
+  --data-dir /srv/layercache-cloud/template --max-size 1073741824 \
+  --min-free-bytes 5368709120
 openssl rand 32 > /etc/layercache-cloud/session-key
 ```
 
 The template supplies each project's quota and cache options. Project ID, repository, signing secret, data directory, and membership come from the cloud service. Optional existing `cloudPostgresUrl`/S3 template settings enable the established PostgreSQL/object-storage cache backend. Without those settings cache metadata and artifacts live in the bounded filesystem. Team/session metadata uses SQLite unless `postgresUrlFile` supplies a dedicated PostgreSQL database connection. Keep database and object-storage capacity bounded separately when they are external to this filesystem.
+
+The Local Cache engine preserves at least 5 GiB free on its filesystem even when `--min-free-bytes` is set lower. On the example 8 GiB pool, this leaves roughly 3 GiB for cache data and metadata; size the initial cohort within that budget.
 
 Store the OAuth secret in `/etc/layercache-cloud/github-client-secret` without printing it. Config, template, and secret files must have owner-only permissions. Copy [the example config](../deploy/cloud/config.example.json) and replace the hostname, client ID, paths, and limits.
 
