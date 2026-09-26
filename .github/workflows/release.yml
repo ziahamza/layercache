@@ -16,6 +16,9 @@ concurrency:
 jobs:
   public-build-qualification:
     name: Require native arm64 Public Build evidence
+    # The first private-cache beta does not deploy Public Builds. Stable tags
+    # continue to require native KVM evidence for this exact source commit.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-beta.') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -743,13 +746,29 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      ${{ always() && startsWith(github.ref, 'refs/tags/v') &&
+          needs.lint.result == 'success' &&
+          needs.performance.result == 'success' &&
+          needs.native.result == 'success' &&
+          needs.buildx-minimum.result == 'success' &&
+          needs.cloud-persistence.result == 'success' &&
+          (needs.public-build-qualification.result == 'success' ||
+           (contains(github.ref_name, '-beta.') &&
+            needs.public-build-qualification.result == 'skipped')) }}
     needs: [public-build-qualification, lint, performance, native, buildx-minimum, cloud-persistence]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - name: Require a well-formed cache beta tag
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-beta.* ]] &&
+             ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+            echo "cache beta tags must use vMAJOR.MINOR.PATCH-beta.NUMBER" >&2
+            exit 1
+          fi
       - name: Download native release files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -810,8 +829,12 @@ jobs:
           }
 
           require_trusted_tag
+          release_flags=()
+          if [[ "$TAG" == *-beta.* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "$TAG" dist/* \
-            --draft --verify-tag --generate-notes --title "$TAG"
+            --draft --verify-tag --generate-notes --title "$TAG" "${release_flags[@]}"
 
           # Draft creation and asset upload are separate API operations. Check the
           # tag again after both have finished and immediately before publication.

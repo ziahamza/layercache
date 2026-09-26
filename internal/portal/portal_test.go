@@ -2,10 +2,14 @@ package portal
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,6 +32,94 @@ type portalQA struct {
 	revoked   bool
 	exchanges int
 }
+
+func signPortalOIDCTestToken(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]string{"alg": "RS256", "kid": "portal-qa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
+	digest := sha256.Sum256([]byte(message))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return message + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func TestPortalManagedOIDCRejectsRecycledRepositoryName(t *testing.T) {
+	q := newPortalQA(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/jwks" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+			"kid": "portal-qa", "kty": "RSA", "alg": "RS256", "use": "sig",
+			"n": base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+			"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes()),
+		}}})
+	}))
+	defer issuer.Close()
+	q.cfg.ProjectTemplate.GitHubOIDCIssuer = issuer.URL
+	q.p.cfg.ProjectTemplate.GitHubOIDCIssuer = issuer.URL
+	alice := q.login("alice")
+	team := q.team(alice, "Team")
+	project := q.project(alice, team, "acme/alpha")
+	if id, err := q.p.store.RepositoryID(context.Background(), project.ID); err != nil || id != "123" {
+		t.Fatalf("provisioned repository ID = %q, %v", id, err)
+	}
+	exchange := func(repositoryID string, includeID bool) int {
+		t.Helper()
+		now := time.Now().UTC()
+		claims := map[string]any{
+			"iss": issuer.URL, "aud": "layercache:" + project.ID,
+			"iat": now.Add(-time.Minute).Unix(), "nbf": now.Add(-time.Minute).Unix(), "exp": now.Add(5 * time.Minute).Unix(),
+			"sub": "repo:acme/alpha:ref:refs/heads/main", "repository": "acme/alpha",
+			"ref": "refs/heads/main", "sha": strings.Repeat("a", 40),
+			"event_name": "push", "run_id": "123", "run_attempt": "1", "check_run_id": "456",
+		}
+		if includeID {
+			claims["repository_id"] = repositoryID
+		}
+		body, err := json.Marshal(map[string]string{
+			"project": project.ID, "compatibility": "linux-amd64-schema1",
+			"idToken": signPortalOIDCTestToken(t, key, claims),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return q.request("POST", "/v1/auth/github-oidc/exchange", string(body), nil, nil).Code
+	}
+	if code := exchange("123", true); code != http.StatusOK {
+		t.Fatalf("original repository OIDC exchange = %d, want 200", code)
+	}
+	// A new repository at the same owner/name carries a different immutable ID.
+	for _, tc := range []struct {
+		id      string
+		include bool
+	}{{"456", true}, {"", false}, {"not-a-number", true}} {
+		if code := exchange(tc.id, tc.include); code != http.StatusUnauthorized {
+			t.Fatalf("recycled or missing repository ID %q exchange = %d, want 401", tc.id, code)
+		}
+	}
+	if _, err := q.p.store.db.Exec(`UPDATE lc_portal_projects SET repository_id='' WHERE id=$1`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if code := exchange("123", true); code != http.StatusUnauthorized {
+		t.Fatalf("legacy blank repository ID exchange = %d, want 401", code)
+	}
+}
+
 type browserQA struct {
 	cookie *http.Cookie
 	csrf   string
@@ -69,7 +161,7 @@ func newPortalQA(t *testing.T) *portalQA {
 				http.Error(w, "revoked", 401)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"full_name": strings.TrimPrefix(r.URL.Path, "/repos/"), "default_branch": "main", "permissions": map[string]bool{"admin": q.admin}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 123, "full_name": strings.TrimPrefix(r.URL.Path, "/repos/"), "default_branch": "main", "permissions": map[string]bool{"admin": q.admin}})
 		case r.URL.Path == "/users/bob":
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": 2, "login": "bob"})
 		default:

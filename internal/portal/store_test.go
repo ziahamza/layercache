@@ -73,7 +73,7 @@ func mustTeam(t *testing.T, s *Store, user string) Team {
 }
 func mustProject(t *testing.T, s *Store, user, team, repo string) Project {
 	t.Helper()
-	v, err := s.CreateProject(context.Background(), user, team, "Example project", repo, "refs/heads/main")
+	v, err := s.CreateProject(context.Background(), user, team, "Example project", repo, "123", "refs/heads/main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +94,68 @@ func requireErr(t *testing.T, got, want error) {
 	if !errors.Is(got, want) {
 		t.Fatalf("got error %v; want %v", got, want)
 	}
+}
+
+func TestLegacyProjectMigrationFailsClosedUntilOriginalRepositoryIDRestored(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	filename := filepath.Join(dataDir, "portal.db")
+	legacy, err := sql.Open("sqlite", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE lc_portal_projects (id TEXT PRIMARY KEY, team_id TEXT NOT NULL, name TEXT NOT NULL, repository TEXT NOT NULL, default_ref TEXT NOT NULL, secret TEXT NOT NULL, UNIQUE(team_id,repository))`,
+		`INSERT INTO lc_portal_projects(id,team_id,name,repository,default_ref,secret) VALUES('project-legacy','team-legacy','Legacy','acme/reused','refs/heads/main','secret-legacy')`,
+	} {
+		if _, err := legacy.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(ctx, "", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, err := store.AllProjects(ctx)
+	if err != nil || len(projects) != 1 || projects[0].RepositoryID != "" || projects[0].Repository != "acme/reused" {
+		t.Fatalf("legacy row after migration: %+v, %v", projects, err)
+	}
+	if _, err := store.RepositoryID(ctx, "project-legacy"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("legacy blank ID lookup = %v, want denied", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	template, err := config.Defaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	template.MinFreeBytes = 0
+	cfg := Config{Origin: "https://cloud.example", DataDir: dataDir, SessionKey: []byte(strings.Repeat("k", 32)), GitHubClientID: "client", GitHubClientSecret: "secret", ProjectTemplate: template}
+	if portal, err := New(ctx, cfg); err == nil {
+		_ = portal.Close()
+		t.Fatal("legacy project started without its original repository ID")
+	} else if !strings.Contains(err.Error(), "restore the original numeric ID") {
+		t.Fatalf("legacy recovery error: %v", err)
+	}
+	store, err = OpenStore(ctx, "", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE lc_portal_projects SET repository_id='123' WHERE id='project-legacy'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	portal, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("restart after restoring trusted original ID: %v", err)
+	}
+	defer portal.Close()
 }
 
 func TestStorePersistenceIdentityIsolation(t *testing.T) {
@@ -259,9 +321,9 @@ func TestStoreAuthorizationAndLastAdministrator(t *testing.T) {
 	requireErr(t, s.ChangeMember(ctx, "2", team.ID, "2", "admin"), ErrDenied)
 	_, err := s.Invite(ctx, "2", team.ID, "3", "admin")
 	requireErr(t, err, ErrDenied)
-	_, err = s.CreateProject(ctx, "2", team.ID, "No", "example/no", "refs/heads/main")
+	_, err = s.CreateProject(ctx, "2", team.ID, "No", "example/no", "123", "refs/heads/main")
 	requireErr(t, err, ErrDenied)
-	_, err = s.CreateProject(ctx, "3", team.ID, "No", "example/no", "refs/heads/main")
+	_, err = s.CreateProject(ctx, "3", team.ID, "No", "example/no", "123", "refs/heads/main")
 	requireErr(t, err, ErrDenied)
 	requireErr(t, s.ChangeMember(ctx, "1", team.ID, "2", "owner"), ErrInvalid)
 	if err := s.ChangeMember(ctx, "1", team.ID, "2", "admin"); err != nil {
@@ -302,14 +364,14 @@ func TestStoreLimitsAndInvalidInput(t *testing.T) {
 	}
 	team := mustTeam(t, s, "1")
 	p := mustProject(t, s, "1", team.ID, "example/one")
-	_, err := s.CreateProject(ctx, "1", team.ID, "Duplicate", p.Repository, p.DefaultRef)
+	_, err := s.CreateProject(ctx, "1", team.ID, "Duplicate", p.Repository, p.RepositoryID, p.DefaultRef)
 	requireErr(t, err, ErrConflict)
-	_, err = s.CreateProject(ctx, "1", team.ID, "Case duplicate", strings.ToUpper(p.Repository), p.DefaultRef)
+	_, err = s.CreateProject(ctx, "1", team.ID, "Case duplicate", strings.ToUpper(p.Repository), p.RepositoryID, p.DefaultRef)
 	requireErr(t, err, ErrConflict)
 	for i := 1; i < 10; i++ {
 		mustProject(t, s, "1", team.ID, fmt.Sprintf("example/repo%d", i))
 	}
-	_, err = s.CreateProject(ctx, "1", team.ID, "Overflow", "example/overflow", "refs/heads/main")
+	_, err = s.CreateProject(ctx, "1", team.ID, "Overflow", "example/overflow", "123", "refs/heads/main")
 	requireErr(t, err, ErrLimit)
 	for i := 1; i < 5; i++ {
 		mustTeam(t, s, "1")
@@ -472,7 +534,7 @@ func TestStoreConcurrentGlobalProjectLimit(t *testing.T) {
 			<-start
 			var err error
 			for attempts := 0; attempts < 20; attempts++ {
-				_, err = s.CreateProject(ctx, c.user, c.team, "Concurrent", fmt.Sprintf("example/concurrent%d", i), "refs/heads/main")
+				_, err = s.CreateProject(ctx, c.user, c.team, "Concurrent", fmt.Sprintf("example/concurrent%d", i), "123", "refs/heads/main")
 				var dbErr interface{ SQLState() string }
 				if !errors.As(err, &dbErr) || dbErr.SQLState() != "40001" {
 					break

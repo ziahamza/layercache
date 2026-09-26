@@ -10,6 +10,7 @@ const binary=process.env.LAYERCACHE_BIN;
 if(!binary)throw new Error('Set LAYERCACHE_BIN to the built CLI');
 const root=mkdtempSync(join(tmpdir(),'layercache-cloud-qa.'));
 const users:Record<string,{id:number;login:string}>={alice:{id:1,login:'alice'},bob:{id:2,login:'bob'}};
+const repositoryIDs:Record<string,number>={'acme/web':123,'acme/no-admin':124,'acme/zero-id':0};
 const codes=new Map<string,{user:string;challenge:string;redirect:string}>();
 const github=createServer(async(req,res)=>{
   const url=new URL(req.url!,'http://fixture');res.setHeader('Content-Type','application/json');
@@ -28,7 +29,7 @@ const github=createServer(async(req,res)=>{
   const user=users[(req.headers.authorization||'').replace('Bearer fixture-github-','')];
   if(!user){res.writeHead(401);res.end('{}');return;}
   if(url.pathname==='/user'){res.end(JSON.stringify(user));return;}
-  if(url.pathname.startsWith('/repos/')){const repo=url.pathname.slice('/repos/'.length);res.end(JSON.stringify({full_name:repo,default_branch:'main',permissions:{admin:repo!=='acme/no-admin'}}));return;}
+  if(url.pathname.startsWith('/repos/')){const repo=url.pathname.slice('/repos/'.length);if(!(repo in repositoryIDs)){res.writeHead(404);res.end('{}');return;}res.end(JSON.stringify({id:repositoryIDs[repo],full_name:repo,default_branch:'main',permissions:{admin:repo!=='acme/no-admin'}}));return;}
   if(url.pathname==='/users/bob'){res.end(JSON.stringify(users.bob));return;}
   res.writeHead(404);res.end('{}');
 });

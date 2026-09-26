@@ -2,7 +2,7 @@
 
 Layer Cache reuses build work across short-lived worktrees, clones, VMs, and CI jobs. A local daemon owns a bounded content-addressed cache, speaks native cache protocols, and can fall back to a shared Team Cache or a verified Public Cache.
 
-This repository contains the first working release for Turborepo, GitHub Actions cache v1, and Docker Buildx/BuildKit. It includes local persistence, project-scoped PostgreSQL/S3 cloud persistence, signed Public Cache reads, and a Linux KVM/QEMU Public Build worker. npm/CDN mirrors, Bazel, Vite, Next.js, Xcode, Windows, Actions cache v2, and a general adapter SDK remain out of scope.
+This repository contains working implementations for Turborepo, GitHub Actions cache v1, and Docker Buildx/BuildKit. It includes local persistence, project-scoped PostgreSQL/S3 cloud persistence, signed Public Cache reads, and a Linux KVM/QEMU Public Build worker. An immutable CLI release has not yet been published. npm/CDN mirrors, Bazel, Vite, Next.js, Xcode, Windows, Actions cache v2, and a general adapter SDK remain out of scope.
 
 Release and deployment instructions are in the [verified installer](scripts/README.md), [GitHub runner setup](action/setup/README.md), and [Team Cache deployment guide](docs/deployment.md). See [quota administration](docs/cache-administration.md), [retention policies](docs/retention.md), [trust-key rotation](docs/public-trust.md), and [performance qualification](docs/performance.md) for operations. Native platform execution and an immutable published release remain qualification gates; checked-in workflows alone do not establish a release.
 
@@ -95,8 +95,9 @@ bin/layercache dashboard --config /path/to/project.json
 
 The [CLI-connected dashboard](docs/dashboard.md) shows Local Cache and Team Cache
 health, artifact storage, and reuse reports. Open the complete URL printed by the
-CLI and keep the process running. Hosted self-serve teams, machine enrollment,
-and cloud runners are subsequent slices.
+CLI and keep the process running. [Self-serve cloud teams and projects](docs/self-serve-cloud.md)
+are implemented but await public deployment and real GitHub OAuth qualification.
+Machine enrollment and cloud runners are subsequent slices.
 
 `doctor` is read-only. `repair` recreates missing owned data directories and reconstructs runtime ownership only from the authenticated live daemon identity; it never trusts a PID alone. `gc` requires a running daemon. Uninstall makes the cache choice explicit:
 

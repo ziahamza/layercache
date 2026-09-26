@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,13 +35,14 @@ type Team struct {
 	Role string `json:"role"`
 }
 type Project struct {
-	ID         string `json:"id"`
-	TeamID     string `json:"teamId"`
-	Name       string `json:"name"`
-	Repository string `json:"repository"`
-	DefaultRef string `json:"defaultRef"`
-	Role       string `json:"role,omitempty"`
-	Secret     string `json:"-"`
+	ID           string `json:"id"`
+	TeamID       string `json:"teamId"`
+	Name         string `json:"name"`
+	Repository   string `json:"repository"`
+	RepositoryID string `json:"-"`
+	DefaultRef   string `json:"defaultRef"`
+	Role         string `json:"role,omitempty"`
+	Secret       string `json:"-"`
 }
 type Member struct {
 	UserID string `json:"userId"`
@@ -98,7 +100,7 @@ func OpenStore(ctx context.Context, postgresURL, filename string) (*Store, error
 		`CREATE TABLE IF NOT EXISTS lc_portal_users (id TEXT PRIMARY KEY, login TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS lc_portal_teams (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_by TEXT NOT NULL, revision BIGINT NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS lc_portal_members (team_id TEXT NOT NULL REFERENCES lc_portal_teams(id), user_id TEXT NOT NULL REFERENCES lc_portal_users(id), role TEXT NOT NULL CHECK(role IN ('admin','writer','reader')), PRIMARY KEY(team_id,user_id))`,
-		`CREATE TABLE IF NOT EXISTS lc_portal_projects (id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES lc_portal_teams(id), name TEXT NOT NULL, repository TEXT NOT NULL, default_ref TEXT NOT NULL, secret TEXT NOT NULL, UNIQUE(team_id,repository))`,
+		`CREATE TABLE IF NOT EXISTS lc_portal_projects (id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES lc_portal_teams(id), name TEXT NOT NULL, repository TEXT NOT NULL, repository_id TEXT NOT NULL DEFAULT '', default_ref TEXT NOT NULL, secret TEXT NOT NULL, UNIQUE(team_id,repository))`,
 		`CREATE TABLE IF NOT EXISTS lc_portal_invites (id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES lc_portal_teams(id), user_id TEXT NOT NULL, role TEXT NOT NULL, expires_at BIGINT NOT NULL, UNIQUE(team_id,user_id))`,
 		`CREATE TABLE IF NOT EXISTS lc_portal_sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES lc_portal_users(id), csrf TEXT NOT NULL, token TEXT NOT NULL, expires_at BIGINT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS lc_portal_sessions_user ON lc_portal_sessions(user_id)`,
@@ -108,6 +110,22 @@ func OpenStore(ctx context.Context, postgresURL, filename string) (*Store, error
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return fail()
 		}
+	}
+	// Older portal databases lack the immutable repository identity. Preserve
+	// their records without inferring an ID from a name that may have been reused.
+	rows, err := db.QueryContext(ctx, `SELECT repository_id FROM lc_portal_projects LIMIT 0`)
+	if err != nil {
+		if _, err = db.ExecContext(ctx, `ALTER TABLE lc_portal_projects ADD COLUMN repository_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			// A second process may have completed the same migration after our
+			// probe. The column, not the ALTER result, determines readiness.
+			probe, probeErr := db.QueryContext(ctx, `SELECT repository_id FROM lc_portal_projects LIMIT 0`)
+			if probeErr != nil {
+				return fail()
+			}
+			_ = probe.Close()
+		}
+	} else {
+		_ = rows.Close()
 	}
 	return store, nil
 }
@@ -127,6 +145,10 @@ func validName(name string) bool {
 	return strings.TrimSpace(name) == name && len(name) > 0 && len(name) <= 80 && !strings.ContainsAny(name, "\x00\r\n")
 }
 func validRole(role string) bool { return role == "admin" || role == "writer" || role == "reader" }
+func validRepositoryID(value string) bool {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && parsed > 0 && strconv.FormatInt(parsed, 10) == value
+}
 func (s *Store) UpsertUser(ctx context.Context, user User) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO lc_portal_users(id,login) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET login=excluded.login`, user.ID, user.Login)
 	return err
@@ -201,7 +223,7 @@ func audit(ctx context.Context, tx *sql.Tx, team, actor, action, subject string)
 	return err
 }
 func (s *Store) Projects(ctx context.Context, user string) ([]Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT p.id,p.team_id,p.name,p.repository,p.default_ref,p.secret,m.role FROM lc_portal_projects p JOIN lc_portal_members m ON m.team_id=p.team_id WHERE m.user_id=$1 ORDER BY p.name,p.id`, user)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.id,p.team_id,p.name,p.repository,p.repository_id,p.default_ref,p.secret,m.role FROM lc_portal_projects p JOIN lc_portal_members m ON m.team_id=p.team_id WHERE m.user_id=$1 ORDER BY p.name,p.id`, user)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +231,7 @@ func (s *Store) Projects(ctx context.Context, user string) ([]Project, error) {
 	result := []Project{}
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.TeamID, &p.Name, &p.Repository, &p.DefaultRef, &p.Secret, &p.Role); err != nil {
+		if err := rows.Scan(&p.ID, &p.TeamID, &p.Name, &p.Repository, &p.RepositoryID, &p.DefaultRef, &p.Secret, &p.Role); err != nil {
 			return nil, err
 		}
 		result = append(result, p)
@@ -217,7 +239,7 @@ func (s *Store) Projects(ctx context.Context, user string) ([]Project, error) {
 	return result, rows.Err()
 }
 func (s *Store) AllProjects(ctx context.Context) ([]Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,team_id,name,repository,default_ref,secret FROM lc_portal_projects ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,team_id,name,repository,repository_id,default_ref,secret FROM lc_portal_projects ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -225,16 +247,16 @@ func (s *Store) AllProjects(ctx context.Context) ([]Project, error) {
 	result := []Project{}
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.TeamID, &p.Name, &p.Repository, &p.DefaultRef, &p.Secret); err != nil {
+		if err := rows.Scan(&p.ID, &p.TeamID, &p.Name, &p.Repository, &p.RepositoryID, &p.DefaultRef, &p.Secret); err != nil {
 			return nil, err
 		}
 		result = append(result, p)
 	}
 	return result, rows.Err()
 }
-func (s *Store) CreateProject(ctx context.Context, user, team, name, repository, defaultRef string) (Project, error) {
+func (s *Store) CreateProject(ctx context.Context, user, team, name, repository, repositoryID, defaultRef string) (Project, error) {
 	repository = strings.ToLower(repository)
-	if !validName(name) || repository == "" || !strings.HasPrefix(defaultRef, "refs/heads/") {
+	if !validName(name) || repository == "" || !validRepositoryID(repositoryID) || !strings.HasPrefix(defaultRef, "refs/heads/") {
 		return Project{}, ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -260,8 +282,8 @@ func (s *Store) CreateProject(ctx context.Context, user, team, name, repository,
 		return Project{}, ErrLimit
 	}
 	// Serializable isolation also protects the global count across different teams.
-	p := Project{ID: randomID("project-"), TeamID: team, Name: name, Repository: repository, DefaultRef: defaultRef, Secret: randomID(""), Role: "admin"}
-	result, err := tx.ExecContext(ctx, `INSERT INTO lc_portal_projects(id,team_id,name,repository,default_ref,secret) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(team_id,repository) DO NOTHING`, p.ID, p.TeamID, p.Name, p.Repository, p.DefaultRef, p.Secret)
+	p := Project{ID: randomID("project-"), TeamID: team, Name: name, Repository: repository, RepositoryID: repositoryID, DefaultRef: defaultRef, Secret: randomID(""), Role: "admin"}
+	result, err := tx.ExecContext(ctx, `INSERT INTO lc_portal_projects(id,team_id,name,repository,repository_id,default_ref,secret) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(team_id,repository) DO NOTHING`, p.ID, p.TeamID, p.Name, p.Repository, p.RepositoryID, p.DefaultRef, p.Secret)
 	if err != nil {
 		return Project{}, err
 	}
@@ -274,6 +296,17 @@ func (s *Store) CreateProject(ctx context.Context, user, team, name, repository,
 		return Project{}, err
 	}
 	return p, tx.Commit()
+}
+
+// RepositoryID returns only the ID captured when an administrator provisioned
+// the project. A legacy blank value never authorizes a repository by name.
+func (s *Store) RepositoryID(ctx context.Context, project string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT repository_id FROM lc_portal_projects WHERE id=$1`, project).Scan(&id)
+	if err != nil || !validRepositoryID(id) {
+		return "", ErrDenied
+	}
+	return id, nil
 }
 func (s *Store) MemberRole(ctx context.Context, project, subject string) (string, error) {
 	if !strings.HasPrefix(subject, "github-id:") {

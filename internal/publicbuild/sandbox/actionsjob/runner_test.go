@@ -33,6 +33,7 @@ func TestRunMaintainedJob(t *testing.T) {
         run: |
           test "$GITHUB_JOB" = public-cache
           test "$GITHUB_WORKFLOW_REF" = acme/project/.github/workflows/public-cache.yml@refs/heads/main
+          umask 022
           mkdir -p cache
           printf 'public-cache-payload' > cache/artifact.txt`))
 

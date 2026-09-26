@@ -34,6 +34,14 @@ The shell gate requires actionlint 1.7.12 and ShellCheck 0.10.0. The CI workflow
 
 Tag publication also depends on the dedicated `Cloud persistence QA / Linux x64` job. It starts PostgreSQL 16 and a pinned MinIO service, runs the real opt-in cloud, measurement, and Public Build PostgreSQL suites under the race detector, then installs a fresh binary and proves Team Turbo and Actions bytes survive a clean process restart through PostgreSQL/S3.
 
+Tags in the `v<major>.<minor>.<patch>-beta.<number>` series publish a cache-only
+prerelease after the native client, protocol, performance, lint, and cloud
+persistence jobs pass. This beta does not claim qualified Public Builds. Stable
+tags continue to require the exact-commit Linux arm64 KVM Public Build run on a
+trusted runner. A manual `Release` dispatch exercises the native jobs without
+publishing a tag; the immutable prerelease is created only by a tag push from a
+reviewed main commit.
+
 The repository must have GitHub release immutability enabled before cutting a tag. The publish job peels annotated tags to their commit, requires that commit to equal the `github.sha` tested by the release run, uploads every asset to a draft, and repeats the tag check immediately before publication. It accepts the release only after GitHub's API reports it immutable and the locked tag still resolves to the tested commit.
 
 Focused installed-product scenarios are also available:

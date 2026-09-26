@@ -3,12 +3,13 @@
 Run the installer from an inspected checkout pinned to an immutable commit:
 
 ```sh
-bash scripts/install.sh --repository OWNER/layercache --version v0.1.0 \
+bash scripts/install.sh --repository ziahamza/layercache --version PUBLISHED_TAG \
   --prefix "$HOME/.local/bin"
 ```
 
-The repository and version are explicit inputs. No production owner or release
-is assumed. The installer supports Linux amd64/arm64 and macOS arm64, and requires
+The repository and version are explicit inputs. Replace `PUBLISHED_TAG` with an
+actual immutable release tag; a source checkout cannot satisfy this installer.
+The installer supports Linux amd64/arm64 and macOS arm64, and requires
 `gh`, `jq`, `tar`, and `shasum`. Authenticate `gh` or supply `GH_TOKEN` with read
 access to the release and attestations.
 
