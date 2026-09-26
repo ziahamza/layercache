@@ -859,7 +859,10 @@ jobs:
           require_main_history
           release_flags=()
           if [[ "$TAG" == *-beta.* ]]; then
-            release_flags+=(--prerelease)
+            release_flags+=(
+              --prerelease
+              --notes $'Team Cache CLI beta.\n\nPublic Builds are not qualified; hosted cloud requires separate deployment.'
+            )
           fi
           gh release create "$TAG" dist/* \
             --draft --verify-tag --generate-notes --title "$TAG" "${release_flags[@]}"
