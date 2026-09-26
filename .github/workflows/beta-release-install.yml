@@ -1,0 +1,104 @@
+name: Published beta installer
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/beta-release-install.yml
+      - README.md
+      - scripts/README.md
+      - action/setup/README.md
+      - docs/launch-plan.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  attestations: read
+
+concurrency:
+  group: beta-release-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    name: Published beta install / ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+            system: Linux/x86_64
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            system: Linux/aarch64
+          - name: macOS arm64
+            runner: macos-26
+            system: Darwin/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v0.1.0-beta.1
+      SOURCE_SHA: bd84aee3b6064403e0ce51e6f5dda7599b768c3a
+      RELEASE_REPOSITORY: ziahamza/layercache
+    steps:
+      # The workflow is reviewed on this PR; the script comes from the exact
+      # commit that published the release, independent of PR branch contents.
+      - name: Check out the published installer source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ziahamza/layercache
+          ref: bd84aee3b6064403e0ce51e6f5dda7599b768c3a
+          persist-credentials: false
+
+      - name: Check published release and exact source commit
+        run: |
+          set -euo pipefail
+          test "$(uname -s)/$(uname -m)" = '${{ matrix.system }}'
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          release="$(gh api "repos/$RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          jq -e --arg tag "$RELEASE_TAG" '
+            .tag_name == $tag and .draft == false and
+            .prerelease == true and .immutable == true
+          ' <<<"$release" >/dev/null
+          tag="$(gh api "repos/$RELEASE_REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+          object_type="$(jq -er '.object.type' <<<"$tag")"
+          object_sha="$(jq -er '.object.sha' <<<"$tag")"
+          for _ in {1..16}; do
+            if [[ "$object_type" == commit ]]; then
+              break
+            fi
+            test "$object_type" = tag
+            tag="$(gh api "repos/$RELEASE_REPOSITORY/git/tags/$object_sha")"
+            object_type="$(jq -er '.object.type' <<<"$tag")"
+            object_sha="$(jq -er '.object.sha' <<<"$tag")"
+          done
+          test "$object_type" = commit
+          test "$object_sha" = "$SOURCE_SHA"
+
+      - name: Install the published beta into a fresh runner prefix
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/layercache-beta-install"
+          test ! -e "$prefix"
+          bash scripts/install.sh \
+            --repository "$RELEASE_REPOSITORY" \
+            --version "$RELEASE_TAG" \
+            --prefix "$prefix"
+          test -x "$prefix/layercache"
+          "$prefix/layercache" help >"$RUNNER_TEMP/layercache-help.txt"
+          grep -F 'serve-cloud' "$RUNNER_TEMP/layercache-help.txt"
+          grep -F 'connect' "$RUNNER_TEMP/layercache-help.txt"
+          "$prefix/layercache" setup \
+            --config "$RUNNER_TEMP/layercache-beta-preview.json" \
+            --project github.com/ziahamza/layercache \
+            --data-dir "$RUNNER_TEMP/layercache-beta-preview-data" \
+            --max-size 1073741824 \
+            --min-free-bytes 0 \
+            --preview --json >"$RUNNER_TEMP/layercache-preview.json"
+          jq -e '
+            .preview == true and .configured == false and
+            .projectId == "github.com/ziahamza/layercache" and
+            .maxBytes == 1073741824
+          ' "$RUNNER_TEMP/layercache-preview.json" >/dev/null
+          test ! -e "$RUNNER_TEMP/layercache-beta-preview.json"
