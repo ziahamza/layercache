@@ -65,7 +65,7 @@ layercache serve-cloud --config /etc/layercache-cloud/config.json
 
 The example [systemd unit](../deploy/cloud/layercache-cloud.service) listens on loopback port 7440. Configure the HTTPS proxy to preserve the exact public Host. Host mismatch is rejected; forwarded host headers do not override it. Probe `/healthz`, then verify real GitHub sign-in, team/project creation, a second user's invitation, CLI connection, upload/restore, access removal, and restart persistence before declaring the service live. Do not expose the QA fake GitHub provider.
 
-Back up the metadata database, session encryption key, and cache storage together. The session key encrypts GitHub browser tokens at rest; changing it makes existing encrypted tokens unusable. Browser sessions expire after 12 hours. Keep the key stable across restarts and protect database backups as credentials. Sign out removes the server-side session. OAuth state is single-use and expires after 10 minutes.
+Back up the metadata database, session encryption key, and cache storage together. The session key encrypts GitHub browser tokens at rest; changing it makes existing encrypted tokens unusable. Browser sessions last up to 12 hours. When GitHub reports an access-token lifetime, the session ends 60 seconds before that lifetime; users sign in again when it expires. Keep the key stable across restarts and protect database backups as credentials. Sign out removes the server-side session. OAuth state is single-use and expires after 10 minutes.
 
 The service bounds creation to 128 teams total, five created teams per user, ten projects per team, 128 projects total, and 100 pending invitations per team. Capacity conflicts fail explicitly. This first slice has no billing or automated quota purchase flow.
 
