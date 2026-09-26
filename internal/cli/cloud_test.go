@@ -115,7 +115,7 @@ func TestCloudConfigRequiresProtectedSecretsAndExplicitQuota(t *testing.T) {
 	key := filepath.Join(root, "key")
 	os.WriteFile(secret, []byte("oauth-secret"), 0600)
 	os.WriteFile(key, bytes.Repeat([]byte{42}, 32), 0600)
-	file := cloudFile{Listen: "127.0.0.1:8080", Origin: "https://cloud.example", DataDir: filepath.Join(root, "data"), GitHubClientID: "client", GitHubClientSecretFile: secret, SessionKeyFile: key, ProjectTemplateFile: template, StoragePool: server.StoragePoolConfig{Path: root, MaxBytes: 1 << 30}}
+	file := cloudFile{Listen: "127.0.0.1:8080", Origin: "https://cloud.example", DataDir: filepath.Join(root, "data"), GitHubClientID: "client", TeamCreatorIDs: []string{"123"}, GitHubClientSecretFile: secret, SessionKeyFile: key, ProjectTemplateFile: template, StoragePool: server.StoragePoolConfig{Path: root, MaxBytes: 1 << 30}}
 	path := filepath.Join(root, "cloud.json")
 	save := func() {
 		data, _ := json.Marshal(file)
@@ -128,9 +128,17 @@ func TestCloudConfigRequiresProtectedSecretsAndExplicitQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.SessionKey) != 32 || loaded.GitHubClientSecret != "oauth-secret" {
+	if len(loaded.SessionKey) != 32 || loaded.GitHubClientSecret != "oauth-secret" || len(loaded.TeamCreatorIDs) != 1 || loaded.TeamCreatorIDs[0] != "123" {
 		t.Fatal("missing protected credentials")
 	}
+	for _, ids := range [][]string{nil, {}, {"0"}, {"alice"}, {"01"}, {"+1"}, {"1", "1"}, {"9223372036854775808"}} {
+		file.TeamCreatorIDs = ids
+		save()
+		if _, _, err = loadCloud(path); err == nil {
+			t.Fatalf("accepted invalid team creator IDs %q", ids)
+		}
+	}
+	file.TeamCreatorIDs = []string{"123"}
 	file.StoragePool.MaxBytes = 0
 	save()
 	if _, _, err = loadCloud(path); err == nil {

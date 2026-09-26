@@ -44,7 +44,7 @@ if(setup.status!==0)throw new Error('Fixture setup failed: '+setup.stderr);
 writeFileSync(join(root,'oauth-secret'),'fixture-oauth-secret',{mode:0o600});writeFileSync(join(root,'session-key'),randomBytes(32),{mode:0o600});
 const pool=join(root,'pool');mkdirSync(pool,{mode:0o700});writeFileSync(join(pool,'.layercache-pool'),'layercache-pool-v1\n',{mode:0o600});const space=statfsSync(pool);
 // Tests use an isolated directory on the host filesystem, not a physically bounded volume.
-const config=join(root,'cloud.json');writeFileSync(config,JSON.stringify({listen,origin,dataDir:join(pool,'cloud-data'),githubClientId:'fixture-client',githubClientSecretFile:join(root,'oauth-secret'),sessionKeyFile:join(root,'session-key'),projectTemplateFile:template,storagePool:{path:pool,maxBytes:space.blocks*space.bsize},githubApiUrl:githubOrigin,githubAuthorizeUrl:githubOrigin+'/authorize',githubTokenUrl:githubOrigin+'/token'}),{mode:0o600});
+const config=join(root,'cloud.json');writeFileSync(config,JSON.stringify({listen,origin,dataDir:join(pool,'cloud-data'),githubClientId:'fixture-client',teamCreatorIds:[String(users.alice.id)],githubClientSecretFile:join(root,'oauth-secret'),sessionKeyFile:join(root,'session-key'),projectTemplateFile:template,storagePool:{path:pool,maxBytes:space.blocks*space.bsize},githubApiUrl:githubOrigin,githubAuthorizeUrl:githubOrigin+'/authorize',githubTokenUrl:githubOrigin+'/token'}),{mode:0o600});
 const log=openSync(join(root,'cloud.log'),'w',0o600);const child=spawn(binary,['serve-cloud','--config',config],{stdio:['ignore',log,log]});closeSync(log);
 let stop=false;process.on('SIGINT',()=>{stop=true;});process.on('SIGTERM',()=>{stop=true;});
 try{

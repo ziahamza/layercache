@@ -23,7 +23,7 @@ when the suite completes or is interrupted. Test assertions exit nonzero on
 failure. `CHROMIUM_PATH` can select an explicit Chromium binary; other engines
 use their pinned Playwright installations.
 
-The flow covers real OAuth sign-in, empty-workspace onboarding, team creation,
+The flow covers real OAuth sign-in, beta creator admission denial at both UI and API, empty-workspace onboarding, team creation,
 repository administration denial, project provisioning, an actual cache upload,
 an actual `layercache connect --github-cli` run with isolated fake `gh`, CLI instructions, targeted invitations, reader/writer roles, session reload,
 report periods, four viewport sizes, last-admin protection, member removal,

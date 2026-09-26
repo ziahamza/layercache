@@ -412,8 +412,6 @@ func TestRemoteStorageRejectsArchiveLocationForDifferentCompatibility(t *testing
 }
 
 func TestRemoteStorageTransferTimeoutTracksProgressRatherThanTotalDuration(t *testing.T) {
-	t.Parallel()
-
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Length", "5")
 		flusher, ok := writer.(http.Flusher)
@@ -421,18 +419,26 @@ func TestRemoteStorageTransferTimeoutTracksProgressRatherThanTotalDuration(t *te
 			t.Fatal("test server does not support flushing")
 		}
 		for _, value := range []byte("alive") {
-			_, _ = writer.Write([]byte{value})
+			if _, err := writer.Write([]byte{value}); err != nil {
+				return
+			}
 			flusher.Flush()
 			if request.URL.Path == "/_apis/artifactcache/caches/2/archive" {
-				time.Sleep(120 * time.Millisecond)
+				select {
+				case <-request.Context().Done():
+					return
+				case <-time.After(1500 * time.Millisecond):
+				}
 			} else {
-				time.Sleep(20 * time.Millisecond)
+				// Keep total transfer time above the idle deadline while
+				// leaving enough per-chunk slack for loaded CI runners.
+				time.Sleep(150 * time.Millisecond)
 			}
 		}
 	}))
 	t.Cleanup(server.Close)
 	remote, err := actionscache.NewRemoteStorage(actionscache.RemoteStorageConfig{
-		Endpoint: server.URL, Token: "team-token", TransferIdleTimeout: 50 * time.Millisecond,
+		Endpoint: server.URL, Token: "team-token", TransferIdleTimeout: 500 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)

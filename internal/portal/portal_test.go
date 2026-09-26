@@ -175,7 +175,7 @@ func newPortalQA(t *testing.T) *portalQA {
 	}
 	template.MaxBytes = 8 << 20
 	template.MinFreeBytes = 0
-	q.cfg = Config{Origin: "https://cloud.example", DataDir: t.TempDir(), SessionKey: []byte(strings.Repeat("k", 32)), GitHubClientID: "oauth-id", GitHubClientSecret: "oauth-secret", GitHubAPIURL: q.github.URL, GitHubAuthorizeURL: q.github.URL + "/authorize", GitHubTokenURL: q.github.URL + "/token", ProjectTemplate: template}
+	q.cfg = Config{Origin: "https://cloud.example", DataDir: t.TempDir(), SessionKey: []byte(strings.Repeat("k", 32)), GitHubClientID: "oauth-id", GitHubClientSecret: "oauth-secret", TeamCreatorIDs: []string{"1"}, GitHubAPIURL: q.github.URL, GitHubAuthorizeURL: q.github.URL + "/authorize", GitHubTokenURL: q.github.URL + "/token", ProjectTemplate: template}
 	q.p, err = New(context.Background(), q.cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -268,6 +268,62 @@ func (q *portalQA) capability(project Project, user string) string {
 	return decodeQA[struct {
 		Token string `json:"token"`
 	}](q.t, w).Token
+}
+
+func TestPortalTeamCreationAdmissionAndInvitation(t *testing.T) {
+	q := newPortalQA(t)
+	alice, bob := q.login("alice"), q.login("bob")
+	for _, tc := range []struct {
+		browser *browserQA
+		allowed bool
+	}{{alice, true}, {bob, false}} {
+		response := q.request("GET", "/api/session", "", tc.browser, nil)
+		requireStatus(t, response, 200)
+		session := decodeQA[struct {
+			CanCreateTeam bool `json:"canCreateTeam"`
+		}](t, response)
+		if session.CanCreateTeam != tc.allowed {
+			t.Fatalf("team creation advertised as %v, want %v", session.CanCreateTeam, tc.allowed)
+		}
+	}
+	response := q.request("POST", "/api/teams", `{"name":"Unauthorized"}`, bob, nil)
+	requireStatus(t, response, 403)
+	if !strings.Contains(response.Body.String(), "invited beta creators") {
+		t.Fatal("team admission denial did not explain beta access")
+	}
+	team := q.team(alice, "Beta team")
+	requireStatus(t, q.request("POST", "/api/teams/"+team.ID+"/invitations", `{"login":"bob","role":"reader"}`, alice, nil), 201)
+	response = q.request("GET", "/api/session", "", bob, nil)
+	requireStatus(t, response, 200)
+	workspace := decodeQA[struct {
+		Invitations []Invitation `json:"invitations"`
+		Teams       []Team       `json:"teams"`
+	}](t, response)
+	if len(workspace.Invitations) != 1 || len(workspace.Teams) != 0 {
+		t.Fatalf("expected pending invitation for non-creator, got %+v", workspace)
+	}
+	requireStatus(t, q.request("POST", "/api/invitations/"+workspace.Invitations[0].ID+"/accept", "", bob, nil), 204)
+	response = q.request("GET", "/api/session", "", bob, nil)
+	requireStatus(t, response, 200)
+	workspace = decodeQA[struct {
+		Invitations []Invitation `json:"invitations"`
+		Teams       []Team       `json:"teams"`
+	}](t, response)
+	if len(workspace.Invitations) != 0 || len(workspace.Teams) != 1 || workspace.Teams[0].ID != team.ID {
+		t.Fatalf("non-creator could not use invited team: %+v", workspace)
+	}
+	requireStatus(t, q.request("POST", "/api/teams", `{"name":"Still unauthorized"}`, bob, nil), 403)
+	if err := q.p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	q.cfg.TeamCreatorIDs = []string{"2"}
+	var err error
+	q.p, err = New(context.Background(), q.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireStatus(t, q.request("POST", "/api/teams", `{"name":"Former creator"}`, alice, nil), 403)
+	q.team(bob, "New creator")
 }
 
 func TestPortalOAuthStatePKCEReplayAndSessionCSRF(t *testing.T) {

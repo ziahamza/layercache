@@ -134,7 +134,7 @@ func TestLegacyProjectMigrationFailsClosedUntilOriginalRepositoryIDRestored(t *t
 		t.Fatal(err)
 	}
 	template.MinFreeBytes = 0
-	cfg := Config{Origin: "https://cloud.example", DataDir: dataDir, SessionKey: []byte(strings.Repeat("k", 32)), GitHubClientID: "client", GitHubClientSecret: "secret", ProjectTemplate: template}
+	cfg := Config{Origin: "https://cloud.example", DataDir: dataDir, SessionKey: []byte(strings.Repeat("k", 32)), GitHubClientID: "client", GitHubClientSecret: "secret", TeamCreatorIDs: []string{"1"}, ProjectTemplate: template}
 	if portal, err := New(ctx, cfg); err == nil {
 		_ = portal.Close()
 		t.Fatal("legacy project started without its original repository ID")
